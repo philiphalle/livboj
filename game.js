@@ -26,6 +26,7 @@ const BASE_LEVELS = [
 ];
 const SKINS = ["#f7d3ad", "#e8b98f", "#c98d61", "#a86a44", "#f2c39b"];
 const HAIRS = ["#3a2a1c", "#221b16", "#6b4a2a", "#0f0f10", "#8a5a2b", "#c9a24a"];
+const SUITS = ["#e5484d", "#3aa0ff", "#ffb020", "#8b5cf6", "#22c55e", "#ec4899"];
 const HUES = [28, 205, 140, 320, 52, 265, 0, 175, 95, 235, 300, 185];
 
 function worldSize(n) { return { w: Math.min(900 + (n - 1) * 170, 1560), h: Math.min(600 + (n - 1) * 120, 1040) }; }
@@ -506,11 +507,36 @@ export function createGame(canvas, opts) {
   function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
   function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
   function drawWater(w, h, t) {
-    const g = ctx.createLinearGradient(0, 0, 0, h); g.addColorStop(0, "#12496a"); g.addColorStop(1, "#0c2f45");
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, "#155273"); g.addColorStop(0.5, "#0f4363"); g.addColorStop(1, "#0a2f45");
     ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 2;
-    const rows = Math.max(5, Math.round(h / 86));
-    for (let row = 0; row < rows; row++) { const y0 = (row + 0.5) * (h / rows); ctx.beginPath(); for (let x = 0; x <= w; x += 20) { const y = y0 + Math.sin((x * 0.02) + t + row) * 6; if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.stroke(); }
+    // three parallax wave layers for depth
+    const layers = [
+      { amp: 5, k: 0.016, sp: 0.6, op: 0.05, step: 26 },
+      { amp: 7, k: 0.022, sp: 1.0, op: 0.07, step: 22 },
+      { amp: 4, k: 0.030, sp: 1.6, op: 0.05, step: 20 },
+    ];
+    const rows = Math.max(5, Math.round(h / 78));
+    for (const Ly of layers) {
+      ctx.strokeStyle = `rgba(255,255,255,${Ly.op})`; ctx.lineWidth = 2;
+      for (let row = 0; row < rows; row++) {
+        const y0 = (row + 0.5) * (h / rows);
+        ctx.beginPath();
+        for (let x = 0; x <= w; x += Ly.step) { const y = y0 + Math.sin(x * Ly.k + t * Ly.sp + row) * Ly.amp; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+        ctx.stroke();
+      }
+    }
+    // twinkling surface glints
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    for (let i = 0; i < 26; i++) {
+      const gx = (i * 137.5) % w, gy = (i * 89.3) % h, tw = 0.5 + 0.5 * Math.sin(t * 1.7 + i * 1.3);
+      if (tw > 0.62) { ctx.globalAlpha = (tw - 0.62) * 0.7; ctx.beginPath(); ctx.arc(gx, gy, 1.4, 0, Math.PI * 2); ctx.fill(); }
+    }
+    ctx.globalAlpha = 1;
+    // soft depth vignette
+    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
+    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.28)");
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
   }
   function drawBrygga(o) {
     ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(o.x + 4, o.y + 7, o.w, o.h);
@@ -535,20 +561,41 @@ export function createGame(canvas, opts) {
     ctx.restore();
   }
   function drawSwimmer(s) {
-    const bobY = Math.sin(s.bob || 0) * 2, cx = s.x, cy = s.y + bobY;
+    const bobY = Math.sin(s.bob || 0) * 2.4, cx = s.x, cy = s.y + bobY, R = s.r;
     const frac = s.frac != null ? s.frac : Math.max(0, s.life / s.maxLife);
-    const skin = SKINS[s.sk % SKINS.length], hair = HAIRS[s.hr % HAIRS.length], R = s.r;
-    ctx.strokeStyle = "rgba(180,220,240,0.32)"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.ellipse(cx, cy + 9, R * 1.45, R * 0.72, 0, 0, Math.PI * 2); ctx.stroke();
-    ctx.beginPath(); ctx.ellipse(cx, cy + 9, R * 1.95, R * 0.98, 0, 0, Math.PI * 2); ctx.stroke();
+    const skin = SKINS[s.sk % SKINS.length], hair = HAIRS[s.hr % HAIRS.length];
+    const suit = SUITS[(s.id || 0) % SUITS.length], ph = (s.id || 0) * 1.7;
+    // soft shadow
+    ctx.fillStyle = "rgba(0,0,0,0.15)"; ctx.beginPath(); ctx.ellipse(cx, cy + R * 1.05, R * 0.9, R * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+    // expanding ripple rings
+    for (let k = 0; k < 2; k++) {
+      const rp = (((s.bob || 0) * 0.35 + ph + k * 0.5) % 1 + 1) % 1;
+      ctx.strokeStyle = `rgba(190,225,240,${0.3 * (1 - rp)})`; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.ellipse(cx, cy + 8, R * (1.1 + rp * 1.7), R * (0.55 + rp * 0.85), 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    // sink-time ring (green -> red)
     ctx.strokeStyle = `hsl(${120 * frac},80%,55%)`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(cx, cy, R + 9, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke();
-    ctx.globalAlpha = 0.85; ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.75, R * 0.82, R * 0.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
-    const wave = Math.sin((s.bob || 0) * 1.6) * 5;
+    // torso in a swimsuit + a hint of legs under the surface
+    ctx.globalAlpha = 0.55; ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(cx, cy + R * 1.25, R * 0.5, R * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.92; ctx.fillStyle = suit; ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.78, R * 0.7, R * 0.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+    // waving arms + hands
+    const wave = Math.sin((s.bob || 0) * 1.6) * 6;
     ctx.strokeStyle = skin; ctx.lineWidth = 5; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(cx - R * 0.5, cy + 2); ctx.lineTo(cx - R * 1.25, cy - 9 + wave); ctx.moveTo(cx + R * 0.5, cy + 2); ctx.lineTo(cx + R * 1.25, cy - 9 - wave); ctx.stroke();
-    ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(cx - R * 1.25, cy - 9 + wave, 3.6, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 1.25, cy - 9 - wave, 3.6, 0, Math.PI * 2); ctx.fill(); ctx.lineCap = "butt";
+    ctx.beginPath(); ctx.moveTo(cx - R * 0.5, cy + 2); ctx.lineTo(cx - R * 1.3, cy - 10 + wave); ctx.moveTo(cx + R * 0.5, cy + 2); ctx.lineTo(cx + R * 1.3, cy - 10 - wave); ctx.stroke();
+    ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(cx - R * 1.3, cy - 10 + wave, 3.8, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 1.3, cy - 10 - wave, 3.8, 0, Math.PI * 2); ctx.fill(); ctx.lineCap = "butt";
+    // water droplets flicking off the hands
+    ctx.fillStyle = "rgba(205,235,247,0.85)";
+    for (let k = 0; k < 2; k++) {
+      const dp = (((s.bob || 0) * 0.5 + ph + k) % 1 + 1) % 1, dr = 2 * (1 - dp);
+      if (dr > 0.5) { ctx.beginPath(); ctx.arc(cx + R * 1.3, cy - 10 - dp * 14 - wave, dr, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx - R * 1.3, cy - 10 - dp * 14 + wave, dr, 0, Math.PI * 2); ctx.fill(); }
+    }
+    // head
     ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(cx, cy, R * 0.8, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.8, Math.PI * 1.03, Math.PI * 1.97); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.28, R * 0.6, Math.PI, 0); ctx.fill();
+    // hair — two styles depending on the swimmer
+    ctx.fillStyle = hair;
+    if ((s.id || 0) % 2 === 0) { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.8, Math.PI * 1.03, Math.PI * 1.97); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.28, R * 0.6, Math.PI, 0); ctx.fill(); }
+    else { ctx.beginPath(); ctx.arc(cx, cy - R * 0.08, R * 0.82, Math.PI * 0.96, Math.PI * 2.04); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.56, R * 0.26, 0, Math.PI * 2); ctx.fill(); }
+    // eyes + worried brows + open mouth
     ctx.fillStyle = "#2a2320"; ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "#2a2320"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx - R * 0.42, cy - 6); ctx.lineTo(cx - R * 0.14, cy - 8); ctx.moveTo(cx + R * 0.14, cy - 8); ctx.lineTo(cx + R * 0.42, cy - 6); ctx.stroke();
     ctx.fillStyle = "#6e3b32"; ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.42, 2.6, 3.3, 0, 0, Math.PI * 2); ctx.fill();
@@ -715,6 +762,7 @@ export function createGame(canvas, opts) {
 
   return {
     hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard,
+    _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,
       phase: authoritative ? phase : (lastView && lastView.phase),
