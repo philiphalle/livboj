@@ -179,8 +179,11 @@ export function createGame(canvas, opts) {
     obstacles = makeObstacles(idx, world.w, world.h);
     const L = levelParams(idx, n);
     levelIndex = idx; caught = 0; missed = 0; timeLeft = L.time; spawnTimer = 0.4; swimmers = []; splashes = [];
-    for (const p of players.values()) { p.x = world.w / 2; p.y = world.h / 2; p.dashActive = 0; p.dashCooldown = 0; }
-    selfPos.x = world.w / 2; selfPos.y = world.h / 2;
+    // Spread players in a small ring around centre so rings/labels don't stack.
+    const arr = [...players.values()], ring = arr.length > 1 ? 80 : 0;
+    arr.forEach((p, i) => { const a = (i / arr.length) * Math.PI * 2; p.x = world.w / 2 + Math.cos(a) * ring; p.y = world.h / 2 + Math.sin(a) * ring; p.dashActive = 0; p.dashCooldown = 0; });
+    const me = players.get(selfId);
+    selfPos.x = me ? me.x : world.w / 2; selfPos.y = me ? me.y : world.h / 2;
   }
   function hostStart() {
     if (!authoritative || phase !== Phase.LOBBY) return;
