@@ -22,6 +22,7 @@
   input::placeholder { color: #6fa6c0; }
   button { border: none; border-radius: 10px; padding: 12px; font-size: 16px; font-weight: 800; cursor: pointer; color: #fff; background: #f4571d; }
   button.secondary { background: #1b5470; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
   .row { display: flex; gap: 8px; }
   .row input { flex: 1; }
   hr { border: none; border-top: 1px solid #1b5470; margin: 4px 0; width: 100%; }
@@ -36,8 +37,8 @@
 
   <div id="menu">
     <div>
-      <label for="name">Ditt namn</label>
-      <input id="name" maxlength="14" placeholder="t.ex. Philip" />
+      <label for="name">Ditt namn (krävs)</label>
+      <input id="name" maxlength="14" placeholder="t.ex. Philip" required />
     </div>
     <button id="solo">Spela själv</button>
     <hr />
@@ -80,13 +81,21 @@
     window.livboj = createGame(canvas, { mode, name: name(), room });
   }
 
-  document.getElementById("solo").onclick = () => show("solo");
-  document.getElementById("join").onclick = () => {
+  const soloBtn = document.getElementById("solo");
+  const joinBtn = document.getElementById("join");
+  const nameOk = () => (nameEl.value || "").trim().length > 0;
+  function updateGate() { const ok = nameOk(); soloBtn.disabled = !ok; joinBtn.disabled = !ok; }
+  nameEl.addEventListener("input", updateGate);
+  updateGate();
+
+  soloBtn.onclick = () => { if (!nameOk()) { nameEl.focus(); return; } show("solo"); };
+  joinBtn.onclick = () => {
+    if (!nameOk()) { nameEl.focus(); return; }
     const room = (codeEl.value || "").trim().toUpperCase();
     if (room.length < 3) { codeEl.focus(); return; }
     show("join", room);
   };
-  codeEl.addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("join").click(); });
+  codeEl.addEventListener("keydown", (e) => { if (e.key === "Enter") joinBtn.click(); });
 </script>
 </body>
 </html>
