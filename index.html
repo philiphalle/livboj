@@ -35,14 +35,16 @@
     background: #0e3b52;
     border-radius: 14px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.45);
-    max-width: 100%;
-    max-height: 78vh;
+    width: min(100%, 96vw);
+    max-height: 80vh;
+    aspect-ratio: 3 / 2;
     touch-action: none;
   }
   .hint {
     font-size: 13px;
     opacity: 0.75;
     text-align: center;
+    max-width: 900px;
   }
   kbd {
     background: #1b5470;
@@ -58,7 +60,8 @@
   <h1>Rädda med <span>livbojen</span> 🛟</h1>
   <canvas id="game" width="900" height="600"></canvas>
   <div class="hint">
-    Rör dig: <kbd>← ↑ → ↓</kbd> &nbsp;·&nbsp; Spurt: <kbd>Blanksteg</kbd> &nbsp;·&nbsp; Fånga simmarna med livbojen för att rädda dem.
+    Dator: <kbd>← ↑ → ↓</kbd> för att styra &nbsp;·&nbsp; <kbd>Blanksteg</kbd> för spurt.
+    &nbsp;·&nbsp; Mobil: dra för att styra, tryck på <b>Spurt</b>.
   </div>
 </div>
 <script>
@@ -71,8 +74,7 @@
   const H = canvas.height;
 
   // ---- Level design -------------------------------------------------------
-  // Simple, escalating difficulty. Tweak freely — this is the "simple first"
-  // knob the whole game reads from.
+  // Simple, escalating difficulty — the "simple first" knob the game reads from.
   const LEVELS = [
     { quota: 5,  spawn: 1300, speed: 22, sink: 9.0, time: 45, maxOnScreen: 4, allowedMisses: 6 },
     { quota: 8,  spawn: 1050, speed: 34, sink: 8.0, time: 45, maxOnScreen: 5, allowedMisses: 5 },
@@ -97,33 +99,116 @@
   let splashes = [];
   let dashCooldown = 0;
   let dashActive = 0;
+  let obstacles = [];
+  let pointerTarget = null; // touch/drag steering target in canvas coords
+  let usingTouch = false;
 
-  // ---- Input --------------------------------------------------------------
+  // Variety so no two swimmers look identical.
+  const SKINS = ["#f7d3ad", "#e8b98f", "#c98d61", "#a86a44", "#f2c39b"];
+  const HAIRS = ["#3a2a1c", "#221b16", "#6b4a2a", "#0f0f10", "#8a5a2b", "#c9a24a"];
+
+  const DASH_BTN = { x: W - 66, y: H - 66, r: 46 };
+
+  // ---- Obstacles (bryggor / wooden docks) ---------------------------------
+  // Open water on level 1; more docks appear as the levels get harder.
+  function makeObstacles(idx) {
+    const specs = [
+      [],
+      [{ x: 130, y: 150, w: 175, h: 34 }],
+      [{ x: 110, y: 130, w: 190, h: 34 }, { x: 610, y: 330, w: 40, h: 175 }],
+      [{ x: 90, y: 120, w: 175, h: 34 }, { x: 625, y: 150, w: 40, h: 185 }, { x: 335, y: 435, w: 235, h: 36 }],
+      [{ x: 80, y: 110, w: 165, h: 32 }, { x: 665, y: 120, w: 40, h: 175 }, { x: 120, y: 445, w: 195, h: 34 }, { x: 560, y: 430, w: 40, h: 150 }],
+    ];
+    return (specs[idx] || []).map((o) => ({ ...o }));
+  }
+
+  // Circle vs rectangle: pushed-out position + surface normal, or null.
+  function circleHitsRect(px, py, pr, o) {
+    const cx = Math.max(o.x, Math.min(px, o.x + o.w));
+    const cy = Math.max(o.y, Math.min(py, o.y + o.h));
+    const dx = px - cx, dy = py - cy;
+    if (dx * dx + dy * dy >= pr * pr) return null;
+    const d = Math.hypot(dx, dy);
+    if (d > 0.0001) return { x: px + (dx / d) * (pr - d), y: py + (dy / d) * (pr - d), nx: dx / d, ny: dy / d };
+    const l = px - o.x, r = o.x + o.w - px, t = py - o.y, b = o.y + o.h - py;
+    const m = Math.min(l, r, t, b);
+    if (m === l) return { x: o.x - pr, y: py, nx: -1, ny: 0 };
+    if (m === r) return { x: o.x + o.w + pr, y: py, nx: 1, ny: 0 };
+    if (m === t) return { x: px, y: o.y - pr, nx: 0, ny: -1 };
+    return { x: px, y: o.y + o.h + pr, nx: 0, ny: 1 };
+  }
+
+  function inAnyObstacle(x, y, r) {
+    return obstacles.some((o) => circleHitsRect(x, y, r, o));
+  }
+
+  function tryDash() {
+    if (dashCooldown === 0) { dashActive = 0.18; dashCooldown = 0.9; }
+  }
+
+  // ---- Input: keyboard ----------------------------------------------------
   const keys = Object.create(null);
-  const MOVE_KEYS = new Set(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Space"]);
+  const MOVE_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Space"]);
   addEventListener("keydown", (e) => {
     const k = e.key === " " ? "Space" : e.key;
     keys[k] = true;
     if (MOVE_KEYS.has(e.key) || MOVE_KEYS.has(k)) e.preventDefault();
-    if ((k === "Space") && (state === State.START || state === State.OVER || state === State.WIN)) startGame();
-    if ((k === "Space") && state === State.INTRO) beginLevel();
-    if ((k === "Space") && state === State.CLEARED) nextLevel();
+    if (e.repeat) return; // a held key must not fast-forward through screens
+    if (k === "Space") {
+      if (state === State.START || state === State.OVER || state === State.WIN) startGame();
+      else if (state === State.INTRO) beginLevel();
+      else if (state === State.CLEARED) nextLevel();
+    }
   }, { passive: false });
   addEventListener("keyup", (e) => {
     const k = e.key === " " ? "Space" : e.key;
     keys[k] = false;
   });
 
-  // ---- Flow ---------------------------------------------------------------
-  function startGame() {
-    levelIndex = 0;
-    score = 0;
-    showIntro();
+  // ---- Input: touch (phones) ---------------------------------------------
+  function toCanvas(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
   }
+  function inDashButton(x, y) {
+    return Math.hypot(x - DASH_BTN.x, y - DASH_BTN.y) <= DASH_BTN.r;
+  }
+  function onTouchStart(e) {
+    usingTouch = true;
+    e.preventDefault();
+    if (state === State.START || state === State.OVER || state === State.WIN) { startGame(); return; }
+    if (state === State.INTRO) { beginLevel(); return; }
+    if (state === State.CLEARED) { nextLevel(); return; }
+    for (const t of e.changedTouches) {
+      const p = toCanvas(t.clientX, t.clientY);
+      if (inDashButton(p.x, p.y)) tryDash();
+      else pointerTarget = p;
+    }
+  }
+  function onTouchMove(e) {
+    e.preventDefault();
+    if (state !== State.PLAY) return;
+    for (const t of e.changedTouches) {
+      const p = toCanvas(t.clientX, t.clientY);
+      if (!inDashButton(p.x, p.y)) pointerTarget = p;
+    }
+  }
+  function onTouchEnd(e) {
+    e.preventDefault();
+    if (e.touches.length === 0) pointerTarget = null;
+  }
+  canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", onTouchEnd, { passive: false });
+
+  // ---- Flow ---------------------------------------------------------------
+  function startGame() { levelIndex = 0; score = 0; showIntro(); }
   function showIntro() {
     state = State.INTRO;
-    introTimer = 2.2;
+    introTimer = 2.4;
     player.x = W / 2; player.y = H / 2;
+    pointerTarget = null;
   }
   function beginLevel() {
     const L = LEVELS[levelIndex];
@@ -136,8 +221,13 @@
     splashes = [];
     dashCooldown = 0;
     dashActive = 0;
+    obstacles = makeObstacles(levelIndex);
+    player.x = W / 2; player.y = H / 2;
+    pointerTarget = null;
   }
   function nextLevel() {
+    // Progression is strictly sequential: this is only reachable from CLEARED,
+    // and CLEARED is only entered once the level's quota has been rescued.
     levelIndex++;
     if (levelIndex >= LEVELS.length) { state = State.WIN; return; }
     showIntro();
@@ -147,8 +237,12 @@
   function spawnSwimmer() {
     const L = LEVELS[levelIndex];
     const margin = 60;
-    const x = margin + Math.random() * (W - margin * 2);
-    const y = margin + Math.random() * (H - margin * 2);
+    let x, y, tries = 0;
+    do {
+      x = margin + Math.random() * (W - margin * 2);
+      y = margin + Math.random() * (H - margin * 2);
+      tries++;
+    } while (tries < 20 && inAnyObstacle(x, y, 26));
     const ang = Math.random() * Math.PI * 2;
     swimmers.push({
       x, y, r: 16,
@@ -157,6 +251,8 @@
       life: L.sink,
       maxLife: L.sink,
       bob: Math.random() * Math.PI * 2,
+      skin: SKINS[(Math.random() * SKINS.length) | 0],
+      hair: HAIRS[(Math.random() * HAIRS.length) | 0],
     });
   }
 
@@ -171,25 +267,30 @@
 
     const L = LEVELS[levelIndex];
 
-    // Player movement
+    // Movement — keyboard first, otherwise steer toward the touch point.
     let dx = 0, dy = 0;
     if (keys.ArrowLeft) dx -= 1;
     if (keys.ArrowRight) dx += 1;
     if (keys.ArrowUp) dy -= 1;
     if (keys.ArrowDown) dy += 1;
-    if (dx || dy) {
-      const len = Math.hypot(dx, dy) || 1;
-      dx /= len; dy /= len;
+    if (!dx && !dy && pointerTarget) {
+      const tx = pointerTarget.x - player.x, ty = pointerTarget.y - player.y;
+      const dist = Math.hypot(tx, ty);
+      if (dist > 5) { dx = tx / dist; dy = ty / dist; }
     }
+    if (dx || dy) { const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len; }
+
     dashCooldown = Math.max(0, dashCooldown - dt);
     dashActive = Math.max(0, dashActive - dt);
-    if (keys.Space && dashCooldown === 0) {
-      dashActive = 0.18;
-      dashCooldown = 0.9;
-    }
+    if (keys.Space) tryDash();
+
     const speed = player.speed * (dashActive > 0 ? 2.1 : 1);
     player.x += dx * speed * dt;
     player.y += dy * speed * dt;
+    for (const o of obstacles) {
+      const hit = circleHitsRect(player.x, player.y, player.r, o);
+      if (hit) { player.x = hit.x; player.y = hit.y; }
+    }
     player.x = Math.max(player.r, Math.min(W - player.r, player.x));
     player.y = Math.max(player.r, Math.min(H - player.r, player.y));
 
@@ -212,9 +313,17 @@
       s.bob += dt * 4;
       if (s.x < s.r || s.x > W - s.r) { s.vx *= -1; s.x = Math.max(s.r, Math.min(W - s.r, s.x)); }
       if (s.y < s.r || s.y > H - s.r) { s.vy *= -1; s.y = Math.max(s.r, Math.min(H - s.r, s.y)); }
+      for (const o of obstacles) {
+        const hit = circleHitsRect(s.x, s.y, s.r, o);
+        if (hit) {
+          s.x = hit.x; s.y = hit.y;
+          const dot = s.vx * hit.nx + s.vy * hit.ny;
+          s.vx -= 2 * dot * hit.nx;
+          s.vy -= 2 * dot * hit.ny;
+        }
+      }
       s.life -= dt;
 
-      // Rescue?
       const d = Math.hypot(s.x - player.x, s.y - player.y);
       if (d < player.r + s.r) {
         caught++;
@@ -224,7 +333,6 @@
         if (caught >= L.quota) { state = State.CLEARED; return; }
         continue;
       }
-      // Sank?
       if (s.life <= 0) {
         missed++;
         splashes.push({ x: s.x, y: s.y, t: 0, good: false });
@@ -233,7 +341,6 @@
       }
     }
 
-    // Splashes
     for (let i = splashes.length - 1; i >= 0; i--) {
       splashes[i].t += dt;
       if (splashes[i].t > 0.6) splashes.splice(i, 1);
@@ -262,13 +369,36 @@
     }
   }
 
+  function drawBrygga(o) {
+    // shadow in the water
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    ctx.fillRect(o.x + 4, o.y + 7, o.w, o.h);
+    // planks
+    ctx.fillStyle = "#7a4f2a";
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+    ctx.strokeStyle = "rgba(40,24,10,0.5)";
+    ctx.lineWidth = 2;
+    const horizontal = o.w >= o.h;
+    if (horizontal) {
+      const n = Math.max(3, Math.round(o.w / 26));
+      for (let i = 1; i < n; i++) { const x = o.x + (o.w / n) * i; ctx.beginPath(); ctx.moveTo(x, o.y); ctx.lineTo(x, o.y + o.h); ctx.stroke(); }
+    } else {
+      const n = Math.max(3, Math.round(o.h / 26));
+      for (let i = 1; i < n; i++) { const y = o.y + (o.h / n) * i; ctx.beginPath(); ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y); ctx.stroke(); }
+    }
+    // top highlight + corner posts
+    ctx.fillStyle = "rgba(212,172,122,0.55)";
+    ctx.fillRect(o.x, o.y, o.w, 3);
+    ctx.fillStyle = "#5c3a1e";
+    const ps = 7;
+    [[o.x, o.y], [o.x + o.w - ps, o.y], [o.x, o.y + o.h - ps], [o.x + o.w - ps, o.y + o.h - ps]]
+      .forEach(([x, y]) => ctx.fillRect(x, y, ps, ps));
+  }
+
   function drawLivboj(x, y, r, glow) {
     ctx.save();
     ctx.translate(x, y);
-    if (glow) {
-      ctx.shadowColor = "rgba(255,255,255,0.9)";
-      ctx.shadowBlur = 22;
-    }
+    if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 22; }
     // Orange ring (donut via evenodd)
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
@@ -293,54 +423,68 @@
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
-    // Rope knots around outer edge
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
-    ctx.lineWidth = 3;
-    for (let i = 0; i < 8; i++) {
-      const a = i * Math.PI / 4;
-      ctx.beginPath();
-      ctx.arc(Math.cos(a) * r, Math.sin(a) * r, r * 0.11, 0, Math.PI * 2);
-      ctx.stroke();
-    }
     ctx.restore();
   }
 
   function drawSwimmer(s) {
     const bobY = Math.sin(s.bob) * 2;
-    // sink-time ring (green -> red)
+    const cx = s.x, cy = s.y + bobY;
     const frac = Math.max(0, s.life / s.maxLife);
-    const hue = 120 * frac;
-    ctx.strokeStyle = `hsl(${hue}, 80%, 55%)`;
+
+    // water ripples around the swimmer
+    ctx.strokeStyle = "rgba(180,220,240,0.32)";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(cx, cy + 9, s.r * 1.45, s.r * 0.72, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(cx, cy + 9, s.r * 1.95 + Math.sin(s.bob) * 2, s.r * 0.98, 0, 0, Math.PI * 2); ctx.stroke();
+
+    // sink-time ring (green -> red)
+    ctx.strokeStyle = `hsl(${120 * frac}, 80%, 55%)`;
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.arc(s.x, s.y + bobY, s.r + 8, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+    ctx.arc(cx, cy, s.r + 9, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
     ctx.stroke();
-    // arms
-    ctx.strokeStyle = "#f2c8a0";
-    ctx.lineWidth = 4;
-    const wave = Math.sin(s.bob * 1.5) * 4;
+
+    // shoulders/torso just under the surface
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = s.skin;
+    ctx.beginPath(); ctx.ellipse(cx, cy + s.r * 0.75, s.r * 0.82, s.r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // waving arms + hands
+    const wave = Math.sin(s.bob * 1.6) * 5;
+    ctx.strokeStyle = s.skin;
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
     ctx.beginPath();
-    ctx.moveTo(s.x - s.r * 0.4, s.y + bobY);
-    ctx.lineTo(s.x - s.r * 1.1, s.y + bobY - 6 + wave);
-    ctx.moveTo(s.x + s.r * 0.4, s.y + bobY);
-    ctx.lineTo(s.x + s.r * 1.1, s.y + bobY - 6 - wave);
+    ctx.moveTo(cx - s.r * 0.5, cy + 2); ctx.lineTo(cx - s.r * 1.25, cy - 9 + wave);
+    ctx.moveTo(cx + s.r * 0.5, cy + 2); ctx.lineTo(cx + s.r * 1.25, cy - 9 - wave);
     ctx.stroke();
+    ctx.fillStyle = s.skin;
+    ctx.beginPath(); ctx.arc(cx - s.r * 1.25, cy - 9 + wave, 3.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + s.r * 1.25, cy - 9 - wave, 3.6, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = "butt";
+
     // head
-    ctx.fillStyle = "#f7d3ad";
-    ctx.beginPath();
-    ctx.arc(s.x, s.y + bobY, s.r * 0.75, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillStyle = s.skin;
+    ctx.beginPath(); ctx.arc(cx, cy, s.r * 0.8, 0, Math.PI * 2); ctx.fill();
     // hair
-    ctx.fillStyle = "#4a3423";
+    ctx.fillStyle = s.hair;
+    ctx.beginPath(); ctx.arc(cx, cy - 2, s.r * 0.8, Math.PI * 1.03, Math.PI * 1.97); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy - s.r * 0.28, s.r * 0.6, Math.PI, 0); ctx.fill();
+    // eyes
+    ctx.fillStyle = "#2a2320";
+    ctx.beginPath(); ctx.arc(cx - s.r * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + s.r * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill();
+    // worried raised eyebrows
+    ctx.strokeStyle = "#2a2320";
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(s.x, s.y + bobY - 2, s.r * 0.75, Math.PI, Math.PI * 2);
-    ctx.fill();
-    // worried mouth
-    ctx.strokeStyle = "#7a4a3a";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y + bobY + 5, 3, 0, Math.PI, true);
+    ctx.moveTo(cx - s.r * 0.42, cy - 6); ctx.lineTo(cx - s.r * 0.14, cy - 8);
+    ctx.moveTo(cx + s.r * 0.14, cy - 8); ctx.lineTo(cx + s.r * 0.42, cy - 6);
     ctx.stroke();
+    // open "help!" mouth
+    ctx.fillStyle = "#6e3b32";
+    ctx.beginPath(); ctx.ellipse(cx, cy + s.r * 0.42, 2.6, 3.3, 0, 0, Math.PI * 2); ctx.fill();
   }
 
   function drawSplash(sp) {
@@ -350,6 +494,22 @@
     ctx.beginPath();
     ctx.arc(sp.x, sp.y, 6 + p * 26, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  function drawDashButton() {
+    if (!usingTouch) return;
+    ctx.save();
+    ctx.globalAlpha = dashCooldown === 0 ? 0.92 : 0.4;
+    ctx.fillStyle = "#f4571d";
+    ctx.beginPath(); ctx.arc(DASH_BTN.x, DASH_BTN.y, DASH_BTN.r, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "800 18px system-ui, sans-serif";
+    ctx.fillText("Spurt", DASH_BTN.x, DASH_BTN.y);
+    ctx.textBaseline = "alphabetic";
+    ctx.restore();
   }
 
   function panel(lines, sub) {
@@ -382,59 +542,61 @@
     ctx.fillText(`Tid ${t}s`, W - 18, 30);
     ctx.fillStyle = "#ffd7c7";
     ctx.fillText(`Missade ${missed}/${L.allowedMisses}`, W - 18, 56);
-    // dash meter
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#bfe0f2";
-    ctx.font = "600 14px system-ui, sans-serif";
-    ctx.fillText(dashCooldown === 0 ? "Spurt redo (blanksteg)" : "Spurt…", 18, H - 16);
+    if (!usingTouch) {
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#bfe0f2";
+      ctx.font = "600 14px system-ui, sans-serif";
+      ctx.fillText(dashCooldown === 0 ? "Spurt redo (blanksteg)" : "Spurt…", 18, H - 16);
+    }
+    drawDashButton();
   }
+
+  // Advance prompt suited to the input the player is using.
+  function advanceText(touch, keyboard) { return usingTouch ? touch : keyboard; }
 
   function render() {
     drawWater();
 
     if (state === State.PLAY || state === State.CLEARED || state === State.OVER) {
+      for (const o of obstacles) drawBrygga(o);
       for (const s of swimmers) drawSwimmer(s);
       for (const sp of splashes) drawSplash(sp);
       drawLivboj(player.x, player.y, player.r, dashActive > 0);
       drawHUD();
     }
 
+    ctx.textAlign = "center";
     if (state === State.START) {
       drawLivboj(W / 2, H / 2 - 40, 46, true);
       panel(["Livbojen"], "");
-      ctx.textAlign = "center";
       ctx.font = "500 22px system-ui, sans-serif";
       ctx.fillStyle = "#bfe0f2";
       ctx.fillText("Rädda simmarna innan de sjunker.", W / 2, H / 2 + 60);
-      ctx.fillText("Rör dig med pilarna · Spurta med blanksteg", W / 2, H / 2 + 92);
+      ctx.fillText(advanceText("Dra för att styra · tryck Spurt", "Rör dig med pilarna · spurta med blanksteg"), W / 2, H / 2 + 92);
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Tryck på blanksteg för att börja", W / 2, H / 2 + 140);
+      ctx.fillText(advanceText("Tryck för att börja", "Tryck på blanksteg för att börja"), W / 2, H / 2 + 140);
     } else if (state === State.INTRO) {
       const L = LEVELS[levelIndex];
       panel([`Nivå ${levelIndex + 1}`], `Rädda ${L.quota} simmare · låt inte ${L.allowedMisses + 1} sjunka`);
-      ctx.textAlign = "center";
       ctx.font = "700 20px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Tryck på blanksteg för att hoppa över", W / 2, H / 2 + 70);
+      ctx.fillText(advanceText("Tryck för att starta", "Tryck på blanksteg för att starta"), W / 2, H / 2 + 70);
     } else if (state === State.CLEARED) {
       panel(["Nivå avklarad!"], `Poäng ${score}`);
-      ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Tryck på blanksteg för nästa nivå", W / 2, H / 2 + 70);
+      ctx.fillText(advanceText("Tryck för nästa nivå", "Tryck på blanksteg för nästa nivå"), W / 2, H / 2 + 70);
     } else if (state === State.OVER) {
       panel(["Spelet är slut"], `Din totalpoäng blev ${score}`);
-      ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Tryck på blanksteg för att försöka igen", W / 2, H / 2 + 70);
+      ctx.fillText(advanceText("Tryck för att försöka igen", "Tryck på blanksteg för att försöka igen"), W / 2, H / 2 + 70);
     } else if (state === State.WIN) {
       panel(["Du vann! 🛟", "Alla 5 nivåer avklarade"], `Slutpoäng ${score}`);
-      ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Tryck på blanksteg för att spela igen", W / 2, H / 2 + 84);
+      ctx.fillText(advanceText("Tryck för att spela igen", "Tryck på blanksteg för att spela igen"), W / 2, H / 2 + 84);
     }
   }
 
