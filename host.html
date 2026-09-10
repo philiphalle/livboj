@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Livbojen — Värd</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0a2a3a; color: #eaf6ff; overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #wrap { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 12px; box-sizing: border-box; }
+  h1 { margin: 0; font-size: clamp(20px, 5vw, 30px); font-weight: 800; }
+  h1 span { color: #f4571d; }
+  canvas { background: #0e3b52; border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    width: min(100%, 96vw); max-height: 80vh; aspect-ratio: 3 / 2; touch-action: none; }
+  .card { background: #0e3b52; border-radius: 16px; padding: 22px; width: min(460px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column; gap: 14px; }
+  label { font-size: 13px; opacity: 0.85; }
+  input { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 10px; border: 1px solid #2f7a9e; background: #0a2a3a; color: #eaf6ff; font-size: 16px; }
+  button { border: none; border-radius: 10px; padding: 12px; font-size: 16px; font-weight: 800; cursor: pointer; color: #fff; background: #f4571d; }
+  button.secondary { background: #1b5470; }
+  .code { font-size: 40px; font-weight: 800; letter-spacing: 6px; color: #f4571d; text-align: center; background: #0a2a3a; border-radius: 12px; padding: 12px; }
+  .roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .roster li { background: #0a2a3a; border-radius: 8px; padding: 8px 12px; display: flex; justify-content: space-between; }
+  .you { color: #ffd7c7; }
+  .muted { font-size: 13px; opacity: 0.8; text-align: center; }
+  a { color: #9fd0e8; text-align: center; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Livbojen — <span>värd</span> 🛟</h1>
+
+  <div id="setup" class="card">
+    <div>
+      <label for="name">Ditt namn</label>
+      <input id="name" maxlength="14" placeholder="t.ex. Philip" />
+    </div>
+    <button id="create">Skapa lobby</button>
+    <a href="index.html">← Tillbaka</a>
+  </div>
+
+  <div id="lobby" class="card" hidden>
+    <div>
+      <label>Rumskod — dela med dina vänner</label>
+      <div class="code" id="codeText">----</div>
+    </div>
+    <div class="muted" id="shareLine"></div>
+    <div>
+      <label>Spelare i lobbyn</label>
+      <ul class="roster" id="roster"></ul>
+    </div>
+    <button id="start">Starta spelet</button>
+  </div>
+
+  <canvas id="game" width="900" height="600" hidden></canvas>
+</div>
+
+<script type="module">
+  import { createGame } from "./game.js";
+
+  const nameEl = document.getElementById("name");
+  const setup = document.getElementById("setup");
+  const lobby = document.getElementById("lobby");
+  const canvas = document.getElementById("game");
+  const codeText = document.getElementById("codeText");
+  const rosterEl = document.getElementById("roster");
+  const shareLine = document.getElementById("shareLine");
+
+  try { nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
+
+  // Room code: reuse ?room=… if present (reload-safe), else generate one.
+  const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const params = new URLSearchParams(location.search);
+  let room = (params.get("room") || "").toUpperCase();
+  if (!/^[A-Z0-9]{3,6}$/.test(room)) {
+    room = Array.from({ length: 4 }, () => ALPHABET[(Math.random() * ALPHABET.length) | 0]).join("");
+    const u = new URL(location.href); u.searchParams.set("room", room); history.replaceState(null, "", u);
+  }
+
+  let api = null;
+
+  function renderRoster(list) {
+    rosterEl.innerHTML = "";
+    for (const p of list) {
+      const li = document.createElement("li");
+      const n = document.createElement("span"); n.textContent = p.name; if (p.you) n.className = "you";
+      const tag = document.createElement("span"); tag.textContent = p.you ? "Värd (du)" : "Ansluten"; tag.style.opacity = ".7";
+      li.append(n, tag); rosterEl.appendChild(li);
+    }
+  }
+
+  document.getElementById("create").onclick = () => {
+    const name = (nameEl.value || "Värd").trim().slice(0, 14) || "Värd";
+    try { localStorage.setItem("livboj-name", name); } catch {}
+    codeText.textContent = room;
+    const joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
+    shareLine.textContent = "Länk: " + joinUrl.href;
+    setup.hidden = true; lobby.hidden = false;
+
+    api = createGame(canvas, {
+      mode: "host", name, room,
+      cbs: {
+        onRoster: renderRoster,
+        onPhase: (phase) => {
+          const inLobby = phase === "lobby";
+          lobby.hidden = !inLobby;
+          canvas.hidden = inLobby;
+        },
+      },
+    });
+  };
+
+  document.getElementById("start").onclick = () => { if (api) { api.hostStart(); } };
+</script>
+</body>
+</html>
