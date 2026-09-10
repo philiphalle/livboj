@@ -20,6 +20,7 @@
   input { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 10px; border: 1px solid #2f7a9e; background: #0a2a3a; color: #eaf6ff; font-size: 16px; }
   button { border: none; border-radius: 10px; padding: 12px; font-size: 16px; font-weight: 800; cursor: pointer; color: #fff; background: #f4571d; }
   button.secondary { background: #1b5470; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
   .code { font-size: 40px; font-weight: 800; letter-spacing: 6px; color: #f4571d; text-align: center; background: #0a2a3a; border-radius: 12px; padding: 12px; }
   .roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .roster li { background: #0a2a3a; border-radius: 8px; padding: 8px 12px; display: flex; justify-content: space-between; }
@@ -39,8 +40,8 @@
 
   <div id="setup" class="card">
     <div>
-      <label for="name">Ditt namn</label>
-      <input id="name" maxlength="14" placeholder="t.ex. Philip" />
+      <label for="name">Ditt namn (krävs)</label>
+      <input id="name" maxlength="14" placeholder="t.ex. Philip" required />
     </div>
     <button id="create">Skapa lobby</button>
     <a href="index.html">← Tillbaka</a>
@@ -118,8 +119,15 @@
   }
   document.getElementById("clearBoard").onclick = () => { if (api && api.clearBoard) api.clearBoard(); };
 
-  document.getElementById("create").onclick = () => {
-    const name = (nameEl.value || "Värd").trim().slice(0, 14) || "Värd";
+  const createBtn = document.getElementById("create");
+  const nameOk = () => (nameEl.value || "").trim().length > 0;
+  function updateGate() { createBtn.disabled = !nameOk(); }
+  nameEl.addEventListener("input", updateGate);
+  updateGate();
+
+  createBtn.onclick = () => {
+    if (!nameOk()) { nameEl.focus(); return; }
+    const name = (nameEl.value || "").trim().slice(0, 14);
     try { localStorage.setItem("livboj-name", name); } catch {}
     codeText.textContent = room;
     const joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
