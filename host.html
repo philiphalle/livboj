@@ -13,7 +13,7 @@
   h1 { margin: 0; font-size: clamp(20px, 5vw, 30px); font-weight: 800; }
   h1 span { color: #f4571d; }
   canvas { background: #0e3b52; border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
-    width: min(100%, 96vw); max-height: 80vh; aspect-ratio: 3 / 2; touch-action: none; }
+    width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
   .card { background: #0e3b52; border-radius: 16px; padding: 22px; width: min(460px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,0.45);
     display: flex; flex-direction: column; gap: 14px; }
   label { font-size: 13px; opacity: 0.85; }
