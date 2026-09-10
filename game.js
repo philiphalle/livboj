@@ -1,6 +1,6 @@
 // Livbojen — shared engine for solo / host / join.
 // Host-authoritative multiplayer over WebRTC P2P (Trystero, public signaling).
-import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero/+esm";
+import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
 
 const APP_ID = "livboj-bookbeat-9f3a";
 
@@ -109,12 +109,13 @@ export function createGame(canvas, opts) {
 
   function setupHost() {
     room = joinRoom({ appId: APP_ID }, opts.room);
-    [sendState] = room.makeAction("st");
-    const [, onInput] = room.makeAction("inp"); sendInput = null;
-    const [, onHello] = room.makeAction("hi");
+    const stA = room.makeAction("st");
+    const inpA = room.makeAction("inp");
+    const hiA = room.makeAction("hi");
+    sendState = (snap) => { try { stA.send(snap); } catch (e) {} };
+    hiA.onMessage = (data, peer) => { renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); };
+    inpA.onMessage = (data, peer) => { const p = players.get(peer); if (p && data) p.input = { dx: data.dx || 0, dy: data.dy || 0, dash: !!data.dash }; };
     addPlayer(selfId, myName); // host plays too
-    onHello((data, peer) => { renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
-    onInput((data, peer) => { const p = players.get(peer); if (p && data) p.input = { dx: data.dx || 0, dy: data.dy || 0, dash: !!data.dash }; });
     room.onPeerJoin((peer) => { addPlayer(peer, "Spelare"); emitRoster(); pushState(); });
     room.onPeerLeave((peer) => { players.delete(peer); emitRoster(); });
     emitRoster();
@@ -124,14 +125,14 @@ export function createGame(canvas, opts) {
 
   function setupJoin() {
     room = joinRoom({ appId: APP_ID }, opts.room);
-    const [, onState] = room.makeAction("st");
-    [sendInput] = room.makeAction("inp");
-    [sendHello] = room.makeAction("hi");
+    const stA = room.makeAction("st");
+    const inpA = room.makeAction("inp");
+    const hiA = room.makeAction("hi");
+    stA.onMessage = (data) => applyState(data);
+    sendInput = (inp) => { try { inpA.send(inp); } catch (e) {} };
+    sendHello = (d) => { try { hiA.send(d); } catch (e) {} };
     selfPos.predicted = true;
-    let sentHello = false;
-    const hello = () => { if (!sentHello) { sendHello({ name: myName }); } };
-    room.onPeerJoin(() => { sentHello = false; hello(); sentHello = true; });
-    onState((data) => { applyState(data); });
+    room.onPeerJoin(() => { sendHello({ name: myName }); });
     // keep announcing until a host answers
     const iv = setInterval(() => { if (!lastView) sendHello({ name: myName }); else clearInterval(iv); }, 700);
     // send input at 20Hz
