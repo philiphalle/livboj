@@ -99,7 +99,7 @@
     shareLine.textContent = "Länk: " + joinUrl.href;
     setup.hidden = true; lobby.hidden = false;
 
-    api = createGame(canvas, {
+    api = window.livboj = createGame(canvas, {
       mode: "host", name, room,
       cbs: {
         onRoster: renderRoster,
