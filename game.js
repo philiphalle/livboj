@@ -720,6 +720,10 @@ export function createGame(canvas, opts) {
       phase: authoritative ? phase : (lastView && lastView.phase),
       timeLeft: Math.round(authoritative ? timeLeft : (lastView ? lastView.timeLeft : -1)),
       n: authoritative ? players.size : iPlayer.size, hasState: !!lastView,
+      caught: authoritative ? caught : (lastView ? lastView.caught : 0),
+      level: authoritative ? levelIndex : (lastView ? lastView.levelIndex : 0),
+      monsters: authoritative ? monsters.length : iMonster.size,
+      rescues: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
     }),
   };
 }
