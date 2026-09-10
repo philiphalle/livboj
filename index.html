@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="sv">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Livböj — Rescue Game</title>
+<title>Livbojen — Räddningsspel</title>
 <style>
   :root { color-scheme: dark; }
   html, body {
@@ -58,7 +58,7 @@
   <h1>Rädda med <span>livbojen</span> 🛟</h1>
   <canvas id="game" width="900" height="600"></canvas>
   <div class="hint">
-    Move: <kbd>← ↑ → ↓</kbd> &nbsp;·&nbsp; Dash: <kbd>Space</kbd> &nbsp;·&nbsp; Touch a swimmer with the ring to rescue them.
+    Rör dig: <kbd>← ↑ → ↓</kbd> &nbsp;·&nbsp; Spurt: <kbd>Blanksteg</kbd> &nbsp;·&nbsp; Fånga simmarna med livbojen för att rädda dem.
   </div>
 </div>
 <script>
@@ -372,21 +372,21 @@
     ctx.textAlign = "left";
     ctx.font = "700 20px system-ui, sans-serif";
     ctx.fillStyle = "#eaf6ff";
-    ctx.fillText(`Score ${score}`, 18, 30);
-    ctx.fillText(`Level ${levelIndex + 1}/5`, 18, 56);
+    ctx.fillText(`Poäng ${score}`, 18, 30);
+    ctx.fillText(`Nivå ${levelIndex + 1}/5`, 18, 56);
     ctx.textAlign = "center";
-    ctx.fillText(`Rescued ${caught} / ${L.quota}`, W / 2, 30);
+    ctx.fillText(`Räddade ${caught} / ${L.quota}`, W / 2, 30);
     ctx.textAlign = "right";
     const t = Math.ceil(timeLeft);
     ctx.fillStyle = t <= 10 ? "#ff8a6a" : "#eaf6ff";
-    ctx.fillText(`Time ${t}s`, W - 18, 30);
+    ctx.fillText(`Tid ${t}s`, W - 18, 30);
     ctx.fillStyle = "#ffd7c7";
-    ctx.fillText(`Missed ${missed}/${L.allowedMisses}`, W - 18, 56);
+    ctx.fillText(`Missade ${missed}/${L.allowedMisses}`, W - 18, 56);
     // dash meter
     ctx.textAlign = "left";
     ctx.fillStyle = "#bfe0f2";
     ctx.font = "600 14px system-ui, sans-serif";
-    ctx.fillText(dashCooldown === 0 ? "Dash ready (Space)" : "Dash…", 18, H - 16);
+    ctx.fillText(dashCooldown === 0 ? "Spurt redo (blanksteg)" : "Spurt…", 18, H - 16);
   }
 
   function render() {
@@ -405,36 +405,36 @@
       ctx.textAlign = "center";
       ctx.font = "500 22px system-ui, sans-serif";
       ctx.fillStyle = "#bfe0f2";
-      ctx.fillText("Rescue the swimmers before they sink.", W / 2, H / 2 + 60);
-      ctx.fillText("Move with arrows · Dash with Space", W / 2, H / 2 + 92);
+      ctx.fillText("Rädda simmarna innan de sjunker.", W / 2, H / 2 + 60);
+      ctx.fillText("Rör dig med pilarna · Spurta med blanksteg", W / 2, H / 2 + 92);
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Press Space to start", W / 2, H / 2 + 140);
+      ctx.fillText("Tryck på blanksteg för att börja", W / 2, H / 2 + 140);
     } else if (state === State.INTRO) {
       const L = LEVELS[levelIndex];
-      panel([`Level ${levelIndex + 1}`], `Rescue ${L.quota} swimmers · don't let ${L.allowedMisses + 1} sink`);
+      panel([`Nivå ${levelIndex + 1}`], `Rädda ${L.quota} simmare · låt inte ${L.allowedMisses + 1} sjunka`);
       ctx.textAlign = "center";
       ctx.font = "700 20px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Press Space to skip", W / 2, H / 2 + 70);
+      ctx.fillText("Tryck på blanksteg för att hoppa över", W / 2, H / 2 + 70);
     } else if (state === State.CLEARED) {
-      panel(["Level cleared!"], `Score ${score}`);
+      panel(["Nivå avklarad!"], `Poäng ${score}`);
       ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Press Space for next level", W / 2, H / 2 + 70);
+      ctx.fillText("Tryck på blanksteg för nästa nivå", W / 2, H / 2 + 70);
     } else if (state === State.OVER) {
-      panel(["Game over"], `You rescued a total score of ${score}`);
+      panel(["Spelet är slut"], `Din totalpoäng blev ${score}`);
       ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Press Space to try again", W / 2, H / 2 + 70);
+      ctx.fillText("Tryck på blanksteg för att försöka igen", W / 2, H / 2 + 70);
     } else if (state === State.WIN) {
-      panel(["You win! 🛟", "All 5 levels cleared"], `Final score ${score}`);
+      panel(["Du vann! 🛟", "Alla 5 nivåer avklarade"], `Slutpoäng ${score}`);
       ctx.textAlign = "center";
       ctx.font = "800 24px system-ui, sans-serif";
       ctx.fillStyle = "#f4571d";
-      ctx.fillText("Press Space to play again", W / 2, H / 2 + 84);
+      ctx.fillText("Tryck på blanksteg för att spela igen", W / 2, H / 2 + 84);
     }
   }
 
