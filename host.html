@@ -5,67 +5,118 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>Livbojen — Värd</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --accent: #f4571d; --accent-2: #ff7a3d; --ink: #eaf6ff; --muted: #9fc4d6; --line: rgba(255, 255, 255, 0.10);
+  }
   [hidden] { display: none !important; }
-  html, body { margin: 0; height: 100%; background: #0a2a3a; color: #eaf6ff; overflow: hidden;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  #wrap { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 12px; box-sizing: border-box; }
-  h1 { margin: 0; font-size: clamp(20px, 5vw, 30px); font-weight: 800; }
-  h1 span { color: #f4571d; }
-  canvas { background: #0e3b52; border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
-    width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
-  .card { background: #0e3b52; border-radius: 16px; padding: 22px; width: min(460px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,0.45);
-    display: flex; flex-direction: column; gap: 14px; }
-  label { font-size: 13px; opacity: 0.85; }
-  input { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 10px; border: 1px solid #2f7a9e; background: #0a2a3a; color: #eaf6ff; font-size: 16px; }
-  button { border: none; border-radius: 10px; padding: 12px; font-size: 16px; font-weight: 800; cursor: pointer; color: #fff; background: #f4571d; }
-  button.secondary { background: #1b5470; }
-  button:disabled { opacity: 0.45; cursor: not-allowed; }
-  .code { font-size: 40px; font-weight: 800; letter-spacing: 6px; color: #f4571d; text-align: center; background: #0a2a3a; border-radius: 12px; padding: 12px; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  .sea { position: fixed; inset: 0; z-index: -1; overflow: hidden;
+    background: radial-gradient(130% 100% at 50% -20%, #164e6f 0%, #0c3346 46%, #061a24 100%); }
+  .sea::before, .sea::after { content: ""; position: absolute; left: -30%; right: -30%; bottom: -42%; height: 82%;
+    border-radius: 44%; background: rgba(20, 73, 106, 0.55); animation: swell 17s ease-in-out infinite; }
+  .sea::after { bottom: -48%; background: rgba(12, 52, 72, 0.5); animation-duration: 25s; animation-direction: reverse; }
+  @keyframes swell { 0%, 100% { transform: translateX(-3%) rotate(0deg); } 50% { transform: translateX(3%) rotate(3deg); } }
+
+  #wrap { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 16px; }
+  .brand { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .brand .logo { font-size: 34px; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.4)); }
+  h1 { margin: 0; font-size: clamp(22px, 5vw, 32px); font-weight: 800; letter-spacing: -0.5px; }
+  h1 .accent { color: var(--accent); }
+
+  .card { width: min(440px, 92vw); padding: 22px; display: flex; flex-direction: column; gap: 16px;
+    background: rgba(9, 40, 56, 0.66); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5); max-height: 88vh; overflow: auto; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 12.5px; font-weight: 600; color: var(--muted); letter-spacing: 0.2px; }
+  input { width: 100%; padding: 13px 14px; border-radius: 12px; font-size: 16px; color: var(--ink);
+    background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line); transition: border-color 0.15s, box-shadow 0.15s; }
+  input::placeholder { color: #6b93a8; }
+  input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(244, 87, 29, 0.22); }
+
+  .btn { border: none; border-radius: 12px; padding: 13px 14px; font-size: 16px; font-weight: 800; cursor: pointer; color: #fff;
+    background: linear-gradient(180deg, var(--accent-2), var(--accent)); box-shadow: 0 8px 20px rgba(244, 87, 29, 0.32);
+    transition: transform 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease; }
+  .btn:hover { transform: translateY(-1px); filter: brightness(1.06); }
+  .btn:active { transform: translateY(0); }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35); }
+  .btn:disabled { filter: grayscale(0.35); opacity: 0.45; cursor: not-allowed; box-shadow: none; transform: none; }
+  .btn.ghost { background: rgba(255, 255, 255, 0.07); box-shadow: none; color: var(--ink); font-size: 13px; padding: 9px 12px; }
+
+  .backlink { text-align: center; color: #a9d6ec; font-size: 14px; font-weight: 600; text-decoration: none; }
+  .backlink:hover { color: #fff; }
+
+  .codewrap { display: flex; gap: 8px; align-items: stretch; }
+  .code { flex: 1; font: 800 38px ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: 8px; color: var(--accent);
+    text-align: center; background: rgba(0, 0, 0, 0.28); border-radius: 14px; padding: 12px 6px; }
+  .code.small { font-size: 22px; letter-spacing: 4px; }
+
   .roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .roster li { background: #0a2a3a; border-radius: 8px; padding: 8px 12px; display: flex; justify-content: space-between; }
-  .you { color: #ffd7c7; }
+  .roster li { background: rgba(255, 255, 255, 0.04); border-radius: 10px; padding: 9px 12px; display: flex; justify-content: space-between; align-items: center; }
+  .roster .you { color: #ffd7c7; font-weight: 700; }
+  .roster .tag { font-size: 12px; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; }
+
   .board { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  .board li { background: #0a2a3a; border-radius: 8px; padding: 6px 10px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
-  .board .sc { color: #f4571d; font-weight: 800; }
+  .board li { background: rgba(255, 255, 255, 0.04); border-radius: 10px; padding: 7px 11px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .board .sc { color: var(--accent); font-weight: 800; }
   .boardhead { display: flex; justify-content: space-between; align-items: baseline; }
-  .clear { background: none; border: none; color: #9fd0e8; font-size: 12px; font-weight: 600; padding: 0; width: auto; cursor: pointer; }
-  .muted { font-size: 13px; opacity: 0.8; text-align: center; }
-  a { color: #9fd0e8; text-align: center; font-size: 14px; }
+  .clear { background: none; border: none; color: #a9d6ec; font-size: 12px; font-weight: 700; padding: 0; width: auto; cursor: pointer; }
+  .clear:hover { color: #fff; }
+  .muted { font-size: 12.5px; color: var(--muted); }
+
+  canvas { background: #0e3b52; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
 </style>
 </head>
 <body>
+<div class="sea"></div>
 <div id="wrap">
-  <h1>Livbojen — <span>värd</span> 🛟</h1>
+  <div class="brand" id="brand">
+    <div class="logo">🛟</div>
+    <h1>Livb<span class="accent">o</span>jen — värd</h1>
+  </div>
 
   <div id="setup" class="card">
-    <div>
+    <div class="field">
       <label for="name">Ditt namn (krävs)</label>
-      <input id="name" maxlength="14" placeholder="t.ex. Philip" required />
+      <input id="name" maxlength="14" placeholder="t.ex. Philip" required autocomplete="off" />
     </div>
-    <button id="create">Skapa lobby</button>
-    <a href="index.html">← Tillbaka</a>
+    <button id="create" class="btn">Skapa lobby</button>
+    <a class="backlink" href="index.html">← Tillbaka</a>
   </div>
 
   <div id="lobby" class="card" hidden>
-    <div>
+    <div class="field">
       <label>Rumskod — dela med dina vänner</label>
-      <div class="code" id="codeText">----</div>
+      <div class="codewrap">
+        <div class="code" id="codeText">----</div>
+        <button class="btn ghost" id="copyCode">Kopiera</button>
+      </div>
     </div>
-    <div class="muted" id="shareLine"></div>
-    <div>
+    <div class="field">
+      <label>Inbjudningslänk</label>
+      <div class="codewrap">
+        <div class="code small" id="shareLine" style="letter-spacing:0;font-size:13px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:12px">—</div>
+        <button class="btn ghost" id="copyLink">Kopiera</button>
+      </div>
+    </div>
+    <div class="field">
       <label>Spelare i lobbyn (upp till 12)</label>
       <ul class="roster" id="roster"></ul>
-      <div class="muted" style="text-align:left">Spelare dyker upp här när de ansluter — det kan ta några sekunder.</div>
+      <div class="muted">Spelare dyker upp här när de ansluter — det kan ta några sekunder.</div>
     </div>
-    <div>
+    <div class="field">
       <div class="boardhead">
         <label>🏆 Topplista (sparas i din webbläsare)</label>
         <button class="clear" id="clearBoard" type="button">Rensa</button>
       </div>
-      <ol class="board" id="board"><li class="muted">Inga resultat än</li></ol>
+      <ol class="board" id="board"><li class="empty">Inga resultat än</li></ol>
     </div>
-    <button id="start">Starta spelet</button>
+    <button id="start" class="btn">Starta spelet</button>
   </div>
 
   <canvas id="game" width="900" height="600" hidden></canvas>
@@ -77,14 +128,15 @@
   const nameEl = document.getElementById("name");
   const setup = document.getElementById("setup");
   const lobby = document.getElementById("lobby");
+  const brand = document.getElementById("brand");
   const canvas = document.getElementById("game");
   const codeText = document.getElementById("codeText");
   const rosterEl = document.getElementById("roster");
   const shareLine = document.getElementById("shareLine");
+  const boardEl = document.getElementById("board");
 
   try { nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
 
-  // Room code: reuse ?room=… if present (reload-safe), else generate one.
   const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   const params = new URLSearchParams(location.search);
   let room = (params.get("room") || "").toUpperCase();
@@ -92,23 +144,23 @@
     room = Array.from({ length: 4 }, () => ALPHABET[(Math.random() * ALPHABET.length) | 0]).join("");
     const u = new URL(location.href); u.searchParams.set("room", room); history.replaceState(null, "", u);
   }
+  let joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
 
   let api = null;
 
   function renderRoster(list) {
     rosterEl.innerHTML = "";
+    if (!list || !list.length) { rosterEl.innerHTML = '<li class="empty">Väntar på spelare…</li>'; return; }
     for (const p of list) {
       const li = document.createElement("li");
       const n = document.createElement("span"); n.textContent = p.name; if (p.you) n.className = "you";
-      const tag = document.createElement("span"); tag.textContent = p.you ? "Värd (du)" : "Ansluten"; tag.style.opacity = ".7";
+      const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = p.you ? "Värd (du)" : "Ansluten";
       li.append(n, tag); rosterEl.appendChild(li);
     }
   }
-
-  const boardEl = document.getElementById("board");
   function renderBoard(list) {
     boardEl.innerHTML = "";
-    if (!list || !list.length) { boardEl.innerHTML = '<li class="muted">Inga resultat än</li>'; return; }
+    if (!list || !list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än</li>'; return; }
     list.slice(0, 10).forEach((e, i) => {
       const li = document.createElement("li");
       const left = document.createElement("span");
@@ -118,6 +170,11 @@
       li.append(left, sc); boardEl.appendChild(li);
     });
   }
+  async function copy(text, btn) {
+    try { await navigator.clipboard.writeText(text); const t = btn.textContent; btn.textContent = "Kopierat!"; setTimeout(() => (btn.textContent = t), 1200); } catch {}
+  }
+  document.getElementById("copyCode").onclick = (e) => copy(room, e.currentTarget);
+  document.getElementById("copyLink").onclick = (e) => copy(joinUrl.href, e.currentTarget);
   document.getElementById("clearBoard").onclick = () => { if (api && api.clearBoard) api.clearBoard(); };
 
   const createBtn = document.getElementById("create");
@@ -131,10 +188,9 @@
     const name = (nameEl.value || "").trim().slice(0, 14);
     try { localStorage.setItem("livboj-name", name); } catch {}
     codeText.textContent = room;
-    const joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
-    shareLine.textContent = "Länk: " + joinUrl.href;
+    shareLine.textContent = joinUrl.href;
     setup.hidden = true; lobby.hidden = false;
-
+    renderRoster([]);
     api = window.livboj = createGame(canvas, {
       mode: "host", name, room,
       cbs: {
@@ -143,13 +199,13 @@
         onPhase: (phase) => {
           const inLobby = phase === "lobby";
           lobby.hidden = !inLobby;
+          brand.hidden = !inLobby;
           canvas.hidden = inLobby;
         },
       },
     });
   };
-
-  document.getElementById("start").onclick = () => { if (api) { api.hostStart(); } };
+  document.getElementById("start").onclick = () => { if (api) api.hostStart(); };
 </script>
 </body>
 </html>
