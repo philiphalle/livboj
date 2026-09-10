@@ -24,6 +24,11 @@
   .roster { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .roster li { background: #0a2a3a; border-radius: 8px; padding: 8px 12px; display: flex; justify-content: space-between; }
   .you { color: #ffd7c7; }
+  .board { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .board li { background: #0a2a3a; border-radius: 8px; padding: 6px 10px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .board .sc { color: #f4571d; font-weight: 800; }
+  .boardhead { display: flex; justify-content: space-between; align-items: baseline; }
+  .clear { background: none; border: none; color: #9fd0e8; font-size: 12px; font-weight: 600; padding: 0; width: auto; cursor: pointer; }
   .muted { font-size: 13px; opacity: 0.8; text-align: center; }
   a { color: #9fd0e8; text-align: center; font-size: 14px; }
 </style>
@@ -50,6 +55,13 @@
     <div>
       <label>Spelare i lobbyn</label>
       <ul class="roster" id="roster"></ul>
+    </div>
+    <div>
+      <div class="boardhead">
+        <label>🏆 Topplista (sparas i din webbläsare)</label>
+        <button class="clear" id="clearBoard" type="button">Rensa</button>
+      </div>
+      <ol class="board" id="board"><li class="muted">Inga resultat än</li></ol>
     </div>
     <button id="start">Starta spelet</button>
   </div>
@@ -91,6 +103,21 @@
     }
   }
 
+  const boardEl = document.getElementById("board");
+  function renderBoard(list) {
+    boardEl.innerHTML = "";
+    if (!list || !list.length) { boardEl.innerHTML = '<li class="muted">Inga resultat än</li>'; return; }
+    list.slice(0, 10).forEach((e, i) => {
+      const li = document.createElement("li");
+      const left = document.createElement("span");
+      const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
+      left.textContent = `${i + 1}. ${(e.players || []).join(", ")} · Nivå ${e.level} · ${ds}`;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.score} p`;
+      li.append(left, sc); boardEl.appendChild(li);
+    });
+  }
+  document.getElementById("clearBoard").onclick = () => { if (api && api.clearBoard) api.clearBoard(); };
+
   document.getElementById("create").onclick = () => {
     const name = (nameEl.value || "Värd").trim().slice(0, 14) || "Värd";
     try { localStorage.setItem("livboj-name", name); } catch {}
@@ -103,6 +130,7 @@
       mode: "host", name, room,
       cbs: {
         onRoster: renderRoster,
+        onBoard: renderBoard,
         onPhase: (phase) => {
           const inLobby = phase === "lobby";
           lobby.hidden = !inLobby;
