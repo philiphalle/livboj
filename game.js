@@ -109,12 +109,13 @@ export function createGame(canvas, opts) {
 
   function setupHost() {
     room = joinRoom({ appId: APP_ID }, opts.room);
-    const stA = room.makeAction("st");
-    const inpA = room.makeAction("inp");
-    const hiA = room.makeAction("hi");
-    sendState = (snap) => { try { stA.send(snap); } catch (e) {} };
-    hiA.onMessage = (data, peer) => { renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); };
-    inpA.onMessage = (data, peer) => { const p = players.get(peer); if (p && data) p.input = { dx: data.dx || 0, dy: data.dy || 0, dash: !!data.dash }; };
+    // Trystero 0.21 makeAction -> tuple [send, receive, onProgress].
+    const [stSend] = room.makeAction("st");
+    const [, onInp] = room.makeAction("inp");
+    const [, onHi] = room.makeAction("hi");
+    sendState = (snap) => { try { stSend(snap); } catch (e) {} };
+    onHi((data, peer) => { renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
+    onInp((data, peer) => { const p = players.get(peer); if (p && data) p.input = { dx: data.dx || 0, dy: data.dy || 0, dash: !!data.dash }; });
     addPlayer(selfId, myName); // host plays too
     room.onPeerJoin((peer) => { addPlayer(peer, "Spelare"); emitRoster(); pushState(); });
     room.onPeerLeave((peer) => { players.delete(peer); emitRoster(); });
@@ -125,12 +126,12 @@ export function createGame(canvas, opts) {
 
   function setupJoin() {
     room = joinRoom({ appId: APP_ID }, opts.room);
-    const stA = room.makeAction("st");
-    const inpA = room.makeAction("inp");
-    const hiA = room.makeAction("hi");
-    stA.onMessage = (data) => applyState(data);
-    sendInput = (inp) => { try { inpA.send(inp); } catch (e) {} };
-    sendHello = (d) => { try { hiA.send(d); } catch (e) {} };
+    const [, onSt] = room.makeAction("st");
+    const [inpSend] = room.makeAction("inp");
+    const [hiSend] = room.makeAction("hi");
+    onSt((data) => applyState(data));
+    sendInput = (inp) => { try { inpSend(inp); } catch (e) {} };
+    sendHello = (d) => { try { hiSend(d); } catch (e) {} };
     selfPos.predicted = true;
     room.onPeerJoin(() => { sendHello({ name: myName }); });
     // keep announcing until a host answers
