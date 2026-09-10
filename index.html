@@ -77,7 +77,7 @@
   }
   function show(mode, room) {
     menu.hidden = true; canvas.hidden = false;
-    createGame(canvas, { mode, name: name(), room });
+    window.livboj = createGame(canvas, { mode, name: name(), room });
   }
 
   document.getElementById("solo").onclick = () => show("solo");
