@@ -186,9 +186,24 @@ const sStun = () => { unlockAudio(); beep(300, 0.1, "square", 0.05, 0); beep(230
 // two on level 4, three from level 5.
 function monstersForLevel(idx) { return idx >= 1 ? Math.min(Math.max(1, idx - 1), 3) : 0; }
 
-// ---- Leaderboard (persisted in the host's browser) ------------------------
-function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-leaderboard") || "[]"); } catch { return []; } }
-function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b)); } catch {} }
+// ---- Leaderboard ----------------------------------------------------------
+// Global list on the relay (GET/POST /board), with the host's localStorage as
+// cache and offline fallback. Entries carry a stable id so re-posting (e.g.
+// the one-time upload of an old local list) never duplicates.
+const RELAY_HTTP = RELAY_URL ? RELAY_URL.replace(/^ws(s?):\/\//, "http$1://").replace(/\/$/, "") : "";
+const BOARD_SHOW = 10;
+function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-leaderboard") || "[]").map(withEntryId); } catch { return []; } }
+function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b.slice(0, 50))); } catch {} }
+function withEntryId(e) { return e.id ? e : { ...e, id: `${e.ts}-${e.score}-${e.level}-${(e.players || []).map((p) => (typeof p === "string" ? p : p.name)).join("+")}`.slice(0, 48) }; }
+const sortBoard = (b) => b.sort((a, c) => c.score - a.score || c.ts - a.ts);
+async function fetchGlobalBoard() {
+  if (!RELAY_HTTP) return null;
+  try { const r = await fetch(`${RELAY_HTTP}/board`, { cache: "no-store" }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
+}
+async function postGlobalBoard(entries) {
+  if (!RELAY_HTTP || !entries.length) return null;
+  try { const r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries }) }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
+}
 
 // ==========================================================================
 export function createGame(canvas, opts) {
@@ -196,6 +211,7 @@ export function createGame(canvas, opts) {
   const CW = canvas.width, CH = canvas.height;
   const mode = opts.mode; // 'solo' | 'host' | 'join'
   const myName = (opts.name || "Spelare").slice(0, 14);
+  const myTeam = (opts.team || "").trim().slice(0, 20); // optional, host only
   const cbs = opts.cbs || {};
   const Phase = { LOBBY: "lobby", INTRO: "intro", PLAY: "play", CLEARED: "cleared", OVER: "over", WIN: "win" };
 
@@ -212,7 +228,8 @@ export function createGame(canvas, opts) {
   let hostId = authoritative ? selfId : null;
   let fxOut = []; // rescue/miss events to broadcast this tick
   let lastSec = 999, jLastSec = 999; // countdown-tick trackers
-  let board = loadBoard(); // host's own persisted leaderboard
+  let board = loadBoard(); // leaderboard (global when the relay answers, else the local cache)
+  let boardSource = "local"; // "global" once the relay has answered
   let netBoard = []; // leaderboard received from the host (joiners)
   let monsters = [], monsterSeq = 1;
   let saved = []; // rescued swimmers swimming to / cheering on the shore (cosmetic)
@@ -368,19 +385,31 @@ export function createGame(canvas, opts) {
     }
   }
   function rosterList() { return [...players.values()].map((p) => ({ id: p.id, name: p.id === selfId ? myName : p.name, you: p.id === selfId })); }
-  function emitBoard() { cbs.onBoard && cbs.onBoard(board); }
+  function emitBoard() { cbs.onBoard && cbs.onBoard(board, boardSource); }
+  function adoptBoard(list, source) {
+    board = sortBoard(list.map(withEntryId)); boardSource = source; saveBoardLS(board); emitBoard();
+    if (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) pushState(); // joiners see it too
+  }
+  // Host: read the global list, and upload the pre-global local list once.
+  async function initGlobalBoard() {
+    const local = board;
+    let uploaded = false; try { uploaded = localStorage.getItem("livboj-board-uploaded") === "1"; } catch {}
+    const merged = (!uploaded && local.length) ? await postGlobalBoard(local) : await fetchGlobalBoard();
+    if (!merged) return; // relay unreachable: keep showing the local cache
+    if (!uploaded) { try { localStorage.setItem("livboj-board-uploaded", "1"); } catch {} }
+    adoptBoard(merged, "global");
+  }
   function recordResult() {
-    const entry = {
-      score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(),
+    const entry = withEntryId({
+      score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(), team: myTeam,
       // team total in `score`; per-player breakdown here, best first.
       players: [...players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0 })).sort((a, b) => b.score - a.score),
-    };
-    board.push(entry);
-    board.sort((a, b) => b.score - a.score || b.ts - a.ts);
-    board = board.slice(0, 10);
+    });
+    board.push(entry); sortBoard(board); board = board.slice(0, 50);
     saveBoardLS(board); emitBoard();
+    if (mode === "host") postGlobalBoard([entry]).then((merged) => { if (merged) adoptBoard(merged, "global"); });
   }
-  function clearBoard() { board = []; saveBoardLS(board); emitBoard(); }
+  function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); } // local cache only
 
   // A rescued swimmer heads for the beach and cheers once it arrives. Purely
   // cosmetic and spawned locally on every client (from the rescue event), so
@@ -604,7 +633,7 @@ export function createGame(canvas, opts) {
       monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
       players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
       fx: fxOut,
-      board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board : undefined,
+      board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board.slice(0, BOARD_SHOW) : undefined,
     };
     fxOut = [];
     try { sendState(snap); } catch {}
@@ -1210,7 +1239,7 @@ export function createGame(canvas, opts) {
     if (v.phase === Phase.INTRO) panel([`Nivå ${v.hud.level + 1}`], `Rädda ${v.hud.quota} · ${v.hud.n} spelare`);
     else if (v.phase === Phase.CLEARED) drawLevelBoard(v);
     else if (v.phase === Phase.OVER) drawEndScreen(["Spelet är slut"], `Totalpoäng ${v.hud.score}`, v);
-    else if (v.phase === Phase.WIN) drawEndScreen(["Ni vann! 🛟", "Alla 5 nivåer klara"], `Slutpoäng ${v.hud.score}`, v);
+    else if (v.phase === Phase.WIN) drawEndScreen(["Ni vann! 🛟", `Alla ${BASE_LEVELS.length} nivåer klara`], `Slutpoäng ${v.hud.score}`, v);
   }
   // Current-round standings: every player ranked by points (used between
   // levels and on the end screen).
@@ -1288,7 +1317,7 @@ export function createGame(canvas, opts) {
     const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
-    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  Lag ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
+    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || "Lag"} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
     if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på Enter för lobbyn", CW / 2, y); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
@@ -1354,12 +1383,13 @@ export function createGame(canvas, opts) {
 
   // ---- Boot ---------------------------------------------------------------
   if (mode === "solo") setupSolo();
-  else if (mode === "host") setupNet(true);
+  else if (mode === "host") { setupNet(true); initGlobalBoard(); }
   else setupNet(false);
   requestAnimationFrame(frame);
 
   return {
     hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
+    board: () => ({ source: boardSource, entries: board.slice(0, BOARD_SHOW) }),
     signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
     _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({

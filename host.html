@@ -86,6 +86,10 @@
       <label for="name">Ditt namn (krävs)</label>
       <input id="name" maxlength="14" placeholder="t.ex. Philip" required autocomplete="off" />
     </div>
+    <div class="field">
+      <label for="team">Lagnamn (valfritt — visas i topplistan)</label>
+      <input id="team" maxlength="20" placeholder="t.ex. Kundtjänst" autocomplete="off" />
+    </div>
     <button id="create" class="btn" disabled>Skapa lobby</button>
     <a class="backlink" href="index.html">← Tillbaka</a>
   </div>
@@ -113,8 +117,8 @@
     </div>
     <div class="field">
       <div class="boardhead">
-        <label>🏆 Topplista (sparas i din webbläsare)</label>
-        <button class="clear" id="clearBoard" type="button">Rensa</button>
+        <label id="boardLabel">🏆 Topplista</label>
+        <span class="muted" id="boardSource">hämtar…</span>
       </div>
       <ol class="board" id="board"><li class="empty">Inga resultat än</li></ol>
     </div>
@@ -132,6 +136,8 @@
   const { createGame, build } = await loadGame();
 
   const nameEl = document.getElementById("name");
+  const teamEl = document.getElementById("team");
+  const boardSourceEl = document.getElementById("boardSource");
   const setup = document.getElementById("setup");
   const lobby = document.getElementById("lobby");
   const brand = document.getElementById("brand");
@@ -143,6 +149,7 @@
 
   // restore the saved name, but never over something typed while the code was loading
   try { if (!nameEl.value) nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
+  try { if (!teamEl.value) teamEl.value = localStorage.getItem("livboj-team") || ""; } catch {}
 
   const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   const params = new URLSearchParams(location.search);
@@ -167,7 +174,8 @@
       li.append(n, tag); rosterEl.appendChild(li);
     }
   }
-  function renderBoard(list) {
+  function renderBoard(list, source) {
+    boardSourceEl.textContent = source === "global" ? "global · alla värdar" : "lokal kopia · reläservern nås inte";
     boardEl.innerHTML = "";
     if (!list || !list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än</li>'; return; }
     list.slice(0, 10).forEach((e, i) => {
@@ -175,8 +183,8 @@
       const left = document.createElement("span");
       const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
       const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
-      left.textContent = `${i + 1}. ${names} · Nivå ${e.level} · ${ds}`;
-      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `Lag ${e.score} p`;
+      left.textContent = `${i + 1}. ${e.team ? e.team + " — " : ""}${names} · Nivå ${e.level} · ${ds}`;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.team ? "" : "Lag "}${e.score} p`;
       li.append(left, sc); boardEl.appendChild(li);
     });
   }
@@ -185,7 +193,6 @@
   }
   document.getElementById("copyCode").onclick = (e) => copy(room, e.currentTarget);
   document.getElementById("copyLink").onclick = (e) => copy(joinUrl.href, e.currentTarget);
-  document.getElementById("clearBoard").onclick = () => { if (api && api.clearBoard) api.clearBoard(); };
 
   const createBtn = document.getElementById("create");
   const nameOk = () => (nameEl.value || "").trim().length > 0;
@@ -196,13 +203,15 @@
   createBtn.onclick = () => {
     if (!nameOk()) { nameEl.focus(); return; }
     const name = (nameEl.value || "").trim().slice(0, 14);
-    try { localStorage.setItem("livboj-name", name); } catch {}
+    const team = (teamEl.value || "").trim().slice(0, 20);
+    try { localStorage.setItem("livboj-name", name); localStorage.setItem("livboj-team", team); } catch {}
     codeText.textContent = room;
     shareLine.textContent = joinUrl.href;
+    if (team) { const t = document.createElement("div"); t.className = "muted"; t.textContent = `Lag: ${team}`; t.style.textAlign = "center"; lobby.insertBefore(t, lobby.firstChild); }
     setup.hidden = true; lobby.hidden = false;
     renderRoster([]);
     api = window.livboj = createGame(canvas, {
-      mode: "host", name, room,
+      mode: "host", name, team, room,
       cbs: {
         onRoster: renderRoster,
         onBoard: renderBoard,

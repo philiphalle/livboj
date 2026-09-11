@@ -33,6 +33,20 @@ https://philiphalle.github.io/livboj/host.html?relay=wss://livboj-relay.<you>.wo
 https://philiphalle.github.io/livboj/host.html?relay=off
 ```
 
+## Global leaderboard
+
+The same Worker keeps the shared top list (one Durable Object, `Board`):
+
+```
+GET  https://livboj-relay.livboj.workers.dev/board                    # { entries: [top 50] }
+POST https://livboj-relay.livboj.workers.dev/board  {"entries":[…]}   # merge by id, returns the list
+```
+
+The host posts every finished round and, the first time it runs this version,
+uploads the old local list from its browser once. Anyone with the URL could
+post scores — fine for an office game. To wipe the list, set a secret once
+(`npx wrangler secret put ADMIN_KEY`) and call `DELETE /board?key=<ADMIN_KEY>`.
+
 ## Local test (no account needed)
 
 ```bash
