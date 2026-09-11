@@ -399,7 +399,7 @@ export function createGame(canvas, opts) {
       let rescuer = null;
       for (const p of players.values()) { if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + s.r) { rescuer = p; break; } }
       if (rescuer) {
-        caught++; const pts = 10 + levelIndex * 5; score += pts; rescuer.rescues = (rescuer.rescues || 0) + 1; rescuer.score = (rescuer.score || 0) + pts;
+        caught++; const pts = 10 + levelIndex * 2; score += pts; // gentle ramp: 10 on level 1 -> 24 on level 8 rescuer.rescues = (rescuer.rescues || 0) + 1; rescuer.score = (rescuer.score || 0) + pts;
         splashes.push({ x: s.x, y: s.y, t: 0, good: true }); fxOut.push([Math.round(s.x), Math.round(s.y), 1, s.sk, s.hr, s.id]); sRescue(); spawnSaved(s.x, s.y, s.sk, s.hr, s.id);
         swimmers.splice(i, 1);
         if (caught >= L.quota) { phase = Phase.CLEARED; sClear(); emitPhase(); pushState(); return; }
