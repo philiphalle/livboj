@@ -149,6 +149,7 @@ export function createGame(canvas, opts) {
   let netBoard = []; // leaderboard received from the host (joiners)
   let monsters = [], monsterSeq = 1;
   let saved = []; // rescued swimmers swimming to / cheering on the shore (cosmetic)
+  let lowFx = false; // level-of-detail: lighten shading when the water is crowded
 
   const keys = Object.create(null);
   let usingTouch = false, pointerTarget = null, dashTap = false;
@@ -607,17 +608,18 @@ export function createGame(canvas, opts) {
       const wv = Math.sin(sv.ph * 1.4) * 3;
       ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
       ctx.beginPath(); ctx.moveTo(sv.x - 5, cy); ctx.lineTo(sv.x - 10, cy - 5 + wv); ctx.moveTo(sv.x + 5, cy); ctx.lineTo(sv.x + 10, cy - 5 - wv); ctx.stroke(); ctx.lineCap = "butt";
-      ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(sv.x, cy, 8, 0, Math.PI * 2); ctx.fill();
+      shadedBall(sv.x, cy, 8, skin);
       ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(sv.x, cy - 1, 8, Math.PI, Math.PI * 2); ctx.fill();
     } else {
       const jump = Math.abs(Math.sin(sv.cheer * 6)) * 6, bx = sv.x, by = sv.y - jump;
       ctx.fillStyle = "rgba(0,0,0,0.15)"; ctx.beginPath(); ctx.ellipse(sv.x, sv.y + 11, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = suit; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 5, by - 1, 10, 12, 3) : ctx.rect(bx - 5, by - 1, 10, 12); ctx.fill();
+      if (lowFx) { ctx.fillStyle = suit; } else { const tg = ctx.createLinearGradient(bx, by - 1, bx, by + 11); tg.addColorStop(0, hi(suit)); tg.addColorStop(1, shade(suit)); ctx.fillStyle = tg; }
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 5, by - 1, 10, 12, 3) : ctx.rect(bx - 5, by - 1, 10, 12); ctx.fill();
       ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
       ctx.beginPath(); ctx.moveTo(bx - 3, by + 11); ctx.lineTo(bx - 3, by + 18); ctx.moveTo(bx + 3, by + 11); ctx.lineTo(bx + 3, by + 18); ctx.stroke();
       const raise = 2 + Math.sin(sv.cheer * 6) * 2;
       ctx.beginPath(); ctx.moveTo(bx - 4, by + 1); ctx.lineTo(bx - 10, by - 8 - raise); ctx.moveTo(bx + 4, by + 1); ctx.lineTo(bx + 10, by - 8 - raise); ctx.stroke(); ctx.lineCap = "butt";
-      ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(bx, by - 8, 6, 0, Math.PI * 2); ctx.fill();
+      shadedBall(bx, by - 8, 6, skin);
       ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(bx, by - 9, 6, Math.PI, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = "#3a2a1c"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(bx, by - 7, 2.4, 0.12 * Math.PI, 0.88 * Math.PI); ctx.stroke();
     }
@@ -727,6 +729,11 @@ export function createGame(canvas, opts) {
   }
   // A shaded sphere (light from top-left) — the building block for the 3D look.
   function shadedBall(x, y, r, col) {
+    if (lowFx) { // cheap fallback: flat fill + a single highlight ellipse
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.beginPath(); ctx.ellipse(x - r * 0.3, y - r * 0.35, r * 0.42, r * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
     const g = ctx.createRadialGradient(x - r * 0.38, y - r * 0.42, r * 0.12, x, y, r * 1.05);
     g.addColorStop(0, hi(col)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col));
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
@@ -740,9 +747,8 @@ export function createGame(canvas, opts) {
     ctx.save(); ctx.translate(s.x, s.y + bob * 2.6); ctx.rotate(bob * 0.06);
 
     // ambient occlusion / soft cast shadow into the water
-    const ao = ctx.createRadialGradient(0, R * 0.55, R * 0.2, 0, R * 0.55, R * 1.7);
-    ao.addColorStop(0, "rgba(0,18,32,0.3)"); ao.addColorStop(1, "rgba(0,18,32,0)");
-    ctx.fillStyle = ao; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.55, R * 0.92, 0, 0, Math.PI * 2); ctx.fill();
+    if (lowFx) { ctx.fillStyle = "rgba(0,18,32,0.2)"; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.3, R * 0.8, 0, 0, Math.PI * 2); ctx.fill(); }
+    else { const ao = ctx.createRadialGradient(0, R * 0.55, R * 0.2, 0, R * 0.55, R * 1.7); ao.addColorStop(0, "rgba(0,18,32,0.3)"); ao.addColorStop(1, "rgba(0,18,32,0)"); ctx.fillStyle = ao; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.55, R * 0.92, 0, 0, Math.PI * 2); ctx.fill(); }
 
     // ripples
     for (let k = 0; k < 3; k++) {
@@ -816,7 +822,13 @@ export function createGame(canvas, opts) {
   function drawMonster(m) {
     const R = m.r || 30, t = m.wob || 0, flip = Math.cos(m.dir || 0) < 0 ? -1 : 1, bob = Math.sin(t) * 2;
     ctx.save(); ctx.translate(m.x, m.y + bob); ctx.scale(flip, 1);
-    const body = ctx.createLinearGradient(0, -R, 0, R); body.addColorStop(0, "#4f9e58"); body.addColorStop(1, "#245f35");
+    // ambient occlusion under the creature
+    const mao = ctx.createRadialGradient(-R * 0.2, R * 0.5, R * 0.3, -R * 0.2, R * 0.5, R * 2.2);
+    mao.addColorStop(0, "rgba(0,18,32,0.28)"); mao.addColorStop(1, "rgba(0,18,32,0)");
+    ctx.fillStyle = mao; ctx.beginPath(); ctx.ellipse(-R * 0.2, R * 0.55, R * 2.0, R * 0.95, 0, 0, Math.PI * 2); ctx.fill();
+    // volumetric green shading (light from top-left)
+    const body = ctx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.2, -R * 0.15, 0, R * 1.7);
+    body.addColorStop(0, "#63b56c"); body.addColorStop(0.5, "#3f8f4a"); body.addColorStop(1, "#245f35");
     const dark = "#1f4f2b";
 
     // wake + foam bubbles behind
@@ -840,6 +852,8 @@ export function createGame(canvas, opts) {
 
     // main body + belly + scales + side fin
     ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.98, R * 0.58, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(200,255,210,0.22)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.96, R * 0.56, 0, Math.PI * 1.12, Math.PI * 1.96); ctx.stroke(); // rim light
+    ctx.fillStyle = "rgba(255,255,255,0.16)"; ctx.beginPath(); ctx.ellipse(-R * 0.45, -R * 0.22, R * 0.4, R * 0.18, -0.4, 0, Math.PI * 2); ctx.fill(); // specular
     ctx.fillStyle = "rgba(206,228,158,0.5)"; ctx.beginPath(); ctx.ellipse(-R * 0.1, R * 0.3, R * 0.72, R * 0.28, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = "rgba(255,255,255,0.10)";
     for (let i = 0; i < 8; i++) { ctx.beginPath(); ctx.arc(-R * 0.7 + i * R * 0.2, -R * 0.08 + (i % 2) * R * 0.14, 2, 0, Math.PI * 2); ctx.fill(); }
@@ -883,6 +897,7 @@ export function createGame(canvas, opts) {
     drawShore(v.world.w, v.world.h);
     drawScenery(v.world.w, v.world.h);
     for (const o of v.obstacles) drawBrygga(o);
+    lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
     for (const s of v.swimmers) drawSwimmer(s);
     for (const m of v.monsters || []) drawMonster(m);
     for (const sv of saved) drawSaved(sv);
