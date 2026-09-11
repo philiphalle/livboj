@@ -105,7 +105,10 @@
 </div>
 
 <script type="module">
-  import { createGame } from "./game.js";
+  import { loadGame, watchUpdates } from "./boot.js";
+  // Always the latest build (see boot.js); the watcher reloads the menu
+  // silently on a new build and shows a banner if a game is in progress.
+  const { createGame, build } = await loadGame();
 
   const nameEl = document.getElementById("name");
   const codeEl = document.getElementById("code");
@@ -117,6 +120,13 @@
   if (params.get("room")) codeEl.value = params.get("room").toUpperCase();
   try { nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
 
+  let joinedRoom = "";
+  watchUpdates(build, {
+    isIdle: () => !window.livboj,
+    // a joiner who updates mid-session comes straight back into the same room
+    reloadUrl: () => { const u = new URL(location.href); u.search = ""; if (joinedRoom) { u.searchParams.set("room", joinedRoom); u.searchParams.set("autojoin", "1"); } return u.href; },
+  });
+
   function name() {
     const n = (nameEl.value || "Spelare").trim().slice(0, 14) || "Spelare";
     try { localStorage.setItem("livboj-name", n); } catch {}
@@ -124,6 +134,7 @@
   }
   function show(mode, room) {
     menu.hidden = true; brand.hidden = true; canvas.hidden = false;
+    joinedRoom = mode === "join" ? room : "";
     window.livboj = createGame(canvas, { mode, name: name(), room });
   }
 
@@ -142,6 +153,11 @@
     show("join", room);
   };
   codeEl.addEventListener("keydown", (e) => { if (e.key === "Enter") joinBtn.click(); });
+  // back from an update reload: rejoin without a click (name + room are known)
+  if (params.get("autojoin") === "1" && nameOk() && (codeEl.value || "").trim().length >= 3) {
+    history.replaceState(null, "", (() => { const u = new URL(location.href); u.searchParams.delete("autojoin"); return u.href; })());
+    joinBtn.click();
+  }
 </script>
 </body>
 </html>

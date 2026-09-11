@@ -125,7 +125,11 @@
 </div>
 
 <script type="module">
-  import { createGame } from "./game.js";
+  import { loadGame, watchUpdates } from "./boot.js";
+  // Always the latest build (see boot.js). Before a lobby exists a new build
+  // reloads silently; with a room open the host gets a banner instead, since
+  // reloading would end the round for everyone.
+  const { createGame, build } = await loadGame();
 
   const nameEl = document.getElementById("name");
   const setup = document.getElementById("setup");
@@ -150,6 +154,7 @@
   const relayParam = params.get("relay"); if (relayParam) joinUrl.searchParams.set("relay", relayParam); // joiners must use the same transport
 
   let api = null;
+  watchUpdates(build, { isIdle: () => !api }); // reload keeps ?room=, so the same code works after an update
 
   function renderRoster(list) {
     rosterEl.innerHTML = "";
