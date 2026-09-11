@@ -1,7 +1,7 @@
 // Livbojen — shared engine: solo / host / join.
 // Host-authoritative co-op over WebRTC P2P (Trystero, Nostr signaling), with
 // STUN+TURN for NAT traversal and host migration if the host leaves.
-import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
+import { joinRoom, selfId, getRelaySockets } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
 
 const APP_ID = "livboj-bookbeat-9f3a";
 const MAX_PLAYERS = 12;
@@ -10,6 +10,11 @@ const EAT_DWELL = 1.25; // seconds a monster must hold a swimmer before eating i
 const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 
 // STUN + a public best-effort TURN relay so most NATs can connect without setup.
+// Optional WebSocket relay (see relay/README.md), for networks that block
+// peer-to-peer/WebRTC — most offices. Set it here, or per session via
+// ?relay=wss://… (the host's invite link carries it along to joiners).
+const RELAY_URL = (() => { try { return new URLSearchParams(location.search).get("relay") || ""; } catch { return ""; } })();
+
 const RTC = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -192,8 +197,73 @@ export function createGame(canvas, opts) {
 
   // ---- Setup --------------------------------------------------------------
   function setupSolo() { addPlayer(selfId, myName); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
+  // ---- Relay transport: same surface as a Trystero room (tuple actions,
+  // onPeerJoin/Leave, getPeers) but over one plain WebSocket to the relay.
+  function relayJoin(url, roomId) {
+    const handlers = new Map(); const peers = new Set(); const queue = [];
+    let joinCb = () => {}, leaveCb = () => {}, ws = null, open = false, closed = false;
+    const connect = () => {
+      if (closed) return;
+      ws = new WebSocket(`${url.replace(/\/$/, "")}/room/${encodeURIComponent(roomId)}?id=${encodeURIComponent(selfId)}`);
+      ws.onopen = () => { open = true; for (const q of queue) ws.send(q); queue.length = 0; };
+      ws.onmessage = (e) => {
+        let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (m.t === "welcome") { for (const id of m.peers || []) if (!peers.has(id)) { peers.add(id); joinCb(id); } }
+        else if (m.t === "peer") { if (m.join) { if (!peers.has(m.id)) { peers.add(m.id); joinCb(m.id); } } else if (peers.delete(m.id)) leaveCb(m.id); }
+        else if (m.t === "msg") { const cb = handlers.get(m.a); if (cb) cb(m.d, m.from); }
+      };
+      ws.onclose = () => { open = false; if (!closed) setTimeout(connect, 1500); };
+      ws.onerror = () => {};
+    };
+    connect();
+    const sendRaw = (o) => { const s = JSON.stringify(o); if (open) ws.send(s); else if (queue.length < 60) queue.push(s); };
+    return {
+      makeAction: (name) => [(d) => sendRaw({ t: "msg", a: name, d }), (cb) => handlers.set(name, cb)],
+      onPeerJoin: (cb) => { joinCb = cb; }, onPeerLeave: (cb) => { leaveCb = cb; },
+      getPeers: () => Object.fromEntries([...peers].map((p) => [p, true])),
+      isOpen: () => open, leave: () => { closed = true; try { ws && ws.close(); } catch {} },
+    };
+  }
+
+  // ---- Network diagnostics: signaling reachability + an ICE probe that tells
+  // whether STUN/TURN work from this network (shown in the lobby).
+  const iceProbe = { done: false, host: 0, srflx: 0, relay: 0 };
+  function runIceProbe() {
+    try {
+      const pc = new RTCPeerConnection(RTC); pc.createDataChannel("probe");
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) { iceProbe.done = true; try { pc.close(); } catch {} return; }
+        const c = e.candidate.candidate || "";
+        if (/ typ host/.test(c)) iceProbe.host++; else if (/ typ srflx/.test(c)) iceProbe.srflx++; else if (/ typ relay/.test(c)) iceProbe.relay++;
+      };
+      pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => { iceProbe.done = true; });
+      setTimeout(() => { iceProbe.done = true; try { pc.close(); } catch {} }, 6000);
+    } catch { iceProbe.done = true; }
+  }
+  function netStatus() {
+    const peers = room && room.getPeers ? Object.keys(room.getPeers()).length : 0;
+    if (RELAY_URL) return { transport: "relay", relayOpen: !!(room && room.isOpen && room.isOpen()), peers, ice: iceProbe };
+    let open = 0, total = 0;
+    try { for (const s of Object.values(getRelaySockets() || {})) { total++; if (s && s.readyState === 1) open++; } } catch {}
+    return { transport: "p2p", signaling: { open, total }, peers, ice: iceProbe };
+  }
+  function netSummary() {
+    const n = netStatus();
+    if (n.transport === "relay") return `Nätverk: reläserver ${n.relayOpen ? "ansluten ✓" : "ansluter…"} · ${n.peers} medspelare`;
+    const sig = n.signaling.total ? `signalering ${n.signaling.open}/${n.signaling.total}` : "signalering …";
+    const ice = !n.ice.done ? "testar STUN/TURN…" : `STUN ${n.ice.srflx ? "✓" : "✗"} · TURN ${n.ice.relay ? "✓" : "✗"}`;
+    const warn = n.ice.done && !n.ice.srflx && !n.ice.relay ? " — nätverket verkar blockera P2P" : (n.signaling.total && !n.signaling.open ? " — kan inte nå signaleringen" : "");
+    return `Nätverk: P2P · ${sig} · ${ice} · ${n.peers} medspelare${warn}`;
+  }
+  function drawNetLine() {
+    if (mode === "solo") return;
+    ctx.save(); ctx.textAlign = "center"; ctx.font = "600 12px system-ui, sans-serif";
+    const s = netSummary(); ctx.fillStyle = /blockera|kan inte/.test(s) ? "#ff8a6a" : "#9fc4d6"; ctx.fillText(s, CW / 2, CH - 36); ctx.restore();
+  }
+
   function setupNet(asHost) {
-    room = joinRoom({ appId: APP_ID, rtcConfig: RTC }, opts.room);
+    room = RELAY_URL ? relayJoin(RELAY_URL, opts.room) : joinRoom({ appId: APP_ID, rtcConfig: RTC }, opts.room);
+    if (!RELAY_URL) runIceProbe();
     A.st = room.makeAction("st");
     A.inp = room.makeAction("inp");
     A.hi = room.makeAction("hi");
@@ -1031,6 +1101,7 @@ export function createGame(canvas, opts) {
     drawHUD(v); drawScoreboard(v); drawOverlays(v); drawQuitBtn(v); drawMute();
   }
   function drawWaitScreen(msg) {
+    drawNetLine();
     drawLivboj(CW / 2, CH / 2 - 30, 46, null, true, null, false);
     ctx.fillStyle = "#eaf6ff"; ctx.textAlign = "center"; ctx.font = "800 30px system-ui, sans-serif"; ctx.fillText("Livbojen", CW / 2, CH / 2 + 40);
     ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(msg, CW / 2, CH / 2 + 74);
@@ -1046,6 +1117,7 @@ export function createGame(canvas, opts) {
     ctx.font = "700 16px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(`${names.length} spelare i lobbyn`, CW / 2, CH / 2 + 22);
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     let y = CH / 2 + 46; for (const nm of names.slice(0, 12)) { ctx.fillText(nm, CW / 2, y); y += 20; }
+    drawNetLine();
     drawMute();
   }
   function drawHUD(v) {
@@ -1231,7 +1303,7 @@ export function createGame(canvas, opts) {
   requestAnimationFrame(frame);
 
   return {
-    hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame,
+    hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
     _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,
