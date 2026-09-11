@@ -71,6 +71,22 @@ function makeObstacles(idx, w, h) {
   const sx = w / 900, sy = h / 600;
   return (specs[idx] || []).map((o) => ({ x: o.x * sx, y: o.y * sy, w: o.w * sx, h: o.h * sy }));
 }
+// Swamp zones (level 4+): murky patches where the livboj moves slowly.
+// Docks may run through them; monsters and swimmers are unaffected.
+function makeSwamps(idx, w, h) {
+  const specs = [
+    [], [], [],
+    [{ x: 60, y: 300, w: 260, h: 180 }], // 4
+    [{ x: 560, y: 60, w: 300, h: 200 }], // 5
+    [{ x: 40, y: 60, w: 280, h: 200 }, { x: 600, y: 320, w: 260, h: 180 }], // 6
+    [{ x: 520, y: 40, w: 340, h: 190 }, { x: 40, y: 340, w: 300, h: 170 }], // 7
+    [{ x: 40, y: 40, w: 300, h: 180 }, { x: 580, y: 200, w: 280, h: 190 }, { x: 220, y: 330, w: 200, h: 170 }], // 8
+  ];
+  const sx = w / 900, sy = h / 600;
+  return (specs[idx] || []).map((z) => ({ x: z.x * sx, y: z.y * sy, w: z.w * sx, h: z.h * sy }));
+}
+const SWAMP_SLOW = 0.55;
+const inRect = (x, y, z) => x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h;
 function circleHitsRect(px, py, pr, o) {
   const cx = Math.max(o.x, Math.min(px, o.x + o.w));
   const cy = Math.max(o.y, Math.min(py, o.y + o.h));
@@ -141,6 +157,7 @@ export function createGame(canvas, opts) {
 
   let world = worldSize(1);
   let obstacles = [], swimmers = [], splashes = [];
+  let swamps = [];
   let players = new Map();
   let levelIndex = 0, score = 0, caught = 0, missed = 0, timeLeft = 0, spawnTimer = 0, introTimer = 0;
   let phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;
@@ -269,6 +286,7 @@ export function createGame(canvas, opts) {
     const n = Math.max(1, players.size);
     world = worldSize(n);
     obstacles = makeObstacles(idx, world.w, world.h);
+    swamps = makeSwamps(idx, world.w, world.h);
     const L = levelParams(idx, n);
     levelIndex = idx; caught = 0; missed = 0; timeLeft = 0; spawnTimer = 0.4; swimmers = []; splashes = []; saved = [];
     // Spread players in a small ring around centre so rings/labels don't stack.
@@ -344,7 +362,7 @@ export function createGame(canvas, opts) {
     p.dashCooldown = Math.max(0, p.dashCooldown - dt);
     p.dashActive = Math.max(0, p.dashActive - dt);
     if (input.dash && p.dashCooldown === 0) { p.dashActive = 0.18; p.dashCooldown = 0.9; if (p.id === selfId) sDash(); }
-    const speed = 300 * (p.dashActive > 0 ? 2.1 : 1);
+    const speed = 300 * (p.dashActive > 0 ? 2.1 : 1) * (swamps.some((z) => inRect(p.x, p.y, z)) ? SWAMP_SLOW : 1);
     p.x += input.dx * speed * dt; p.y += input.dy * speed * dt;
     for (const o of obstacles) { const hit = circleHitsRect(p.x, p.y, p.r, o); if (hit) { p.x = hit.x; p.y = hit.y; } }
     p.x = Math.max(p.r, Math.min(world.w - p.r, p.x));
@@ -438,7 +456,7 @@ export function createGame(canvas, opts) {
     selfPos.dashActive = Math.max(0, selfPos.dashActive - dt);
     selfPos.dashCd = Math.max(0, selfPos.dashCd - dt);
     if (input.dash && selfPos.dashCd === 0) { selfPos.dashActive = 0.18; selfPos.dashCd = 0.9; sDash(); }
-    const sp = 300 * (selfPos.dashActive > 0 ? 2.1 : 1);
+    const sp = 300 * (selfPos.dashActive > 0 ? 2.1 : 1) * ((lastView.swamps || []).some((z) => inRect(selfPos.x, selfPos.y, z)) ? SWAMP_SLOW : 1);
     selfPos.x += input.dx * sp * dt; selfPos.y += input.dy * sp * dt;
     for (const o of (lastView.obstacles || [])) { const hit = circleHitsRect(selfPos.x, selfPos.y, selfPos.r, o); if (hit) { selfPos.x = hit.x; selfPos.y = hit.y; } }
     const w = lastView.world;
@@ -455,6 +473,7 @@ export function createGame(canvas, opts) {
       hostId: selfId, phase, levelIndex, score, caught, missed, timeLeft,
       quota: phase === Phase.LOBBY ? 0 : L.quota, allowedMisses: L.allowedMisses, world, introTimer,
       obstacles: obstacles.map((o) => [o.x, o.y, o.w, o.h]),
+      swamps: swamps.map((z) => [z.x, z.y, z.w, z.h]),
       swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr, +Math.min(1, (s.chomp || 0) / EAT_DWELL).toFixed(2)]),
       monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
       players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
@@ -473,6 +492,7 @@ export function createGame(canvas, opts) {
       hostId: d.hostId, phase: d.phase, levelIndex: d.levelIndex, score: d.score, caught: d.caught, missed: d.missed,
       timeLeft: d.timeLeft, quota: d.quota, allowedMisses: d.allowedMisses, world: d.world, introTimer: d.introTimer,
       obstacles: (d.obstacles || []).map((o) => ({ x: o[0], y: o[1], w: o[2], h: o[3] })),
+      swamps: (d.swamps || []).map((z) => ({ x: z[0], y: z[1], w: z[2], h: z[3] })),
     };
     if (d.board) netBoard = d.board;
     lastView.board = netBoard;
@@ -524,7 +544,7 @@ export function createGame(canvas, opts) {
     if (authoritative) return;
     authoritative = true; promoted = true; hostId = selfId;
     const v = lastView;
-    world = v.world; obstacles = v.obstacles.map((o) => ({ ...o }));
+    world = v.world; obstacles = v.obstacles.map((o) => ({ ...o })); swamps = (v.swamps || []).map((z) => ({ ...z }));
     levelIndex = v.levelIndex; score = v.score; caught = v.caught; missed = v.missed; timeLeft = v.timeLeft; phase = v.phase;
     const L = levelParams(levelIndex, Math.max(1, iPlayer.size));
     players = new Map();
@@ -552,7 +572,7 @@ export function createGame(canvas, opts) {
       for (const m of iMonster.values()) { m.x += (m.tx - m.x) * sm; m.y += (m.ty - m.y) * sm; m.wob = (m.wob || 0) + 0.12; }
       for (let i = jSplashes.length - 1; i >= 0; i--) { jSplashes[i].t += 0.03; if (jSplashes[i].t > 0.6) jSplashes.splice(i, 1); }
       return {
-        world: lastView.world, obstacles: lastView.obstacles,
+        world: lastView.world, obstacles: lastView.obstacles, swamps: lastView.swamps || [],
         swimmers: [...iSwim.values()], monsters: [...iMonster.values()],
         players: [...iPlayer.values()].map((p) => p.id === selfId ? { ...p, x: selfPos.x, y: selfPos.y } : p),
         splashes: jSplashes,
@@ -561,7 +581,7 @@ export function createGame(canvas, opts) {
       };
     }
     const L = levelParams(levelIndex, Math.max(1, players.size));
-    return { world, obstacles, swimmers, monsters, players: [...players.values()], splashes, hud: { score, yourScore: (players.get(selfId) || {}).score || 0, level: levelIndex, caught, quota: L.quota, missed, allowedMisses: L.allowedMisses, n: players.size }, phase, introTimer, board };
+    return { world, obstacles, swamps, swimmers, monsters, players: [...players.values()], splashes, hud: { score, yourScore: (players.get(selfId) || {}).score || 0, level: levelIndex, caught, quota: L.quota, missed, allowedMisses: L.allowedMisses, n: players.size }, phase, introTimer, board };
   }
 
   // ---- Rendering ----------------------------------------------------------
@@ -729,6 +749,26 @@ export function createGame(canvas, opts) {
       ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(x - 9, y); ctx.quadraticCurveTo(x - 3, y - wing, x, y); ctx.quadraticCurveTo(x + 3, y - wing, x + 9, y); ctx.stroke();
       ctx.fillStyle = "rgba(240,246,252,0.85)"; ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.lineCap = "butt";
+  }
+  function drawSwamp(z) {
+    // murky, translucent water with a soft edge
+    const g = ctx.createLinearGradient(z.x, z.y, z.x, z.y + z.h);
+    g.addColorStop(0, "rgba(70,95,40,0.42)"); g.addColorStop(1, "rgba(45,70,30,0.55)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(z.x, z.y, z.w, z.h, 28) : ctx.rect(z.x, z.y, z.w, z.h); ctx.fill();
+    ctx.strokeStyle = "rgba(120,150,70,0.35)"; ctx.lineWidth = 3; ctx.stroke();
+    // lily pads (bobbing)
+    for (let i = 0; i < 7; i++) {
+      const px = z.x + 20 + ((i * 131) % Math.max(1, z.w - 40)), py = z.y + 18 + ((i * 89) % Math.max(1, z.h - 36)), r = 7 + (i % 3) * 2, wob = Math.sin(waveT * 1.2 + i) * 1.5;
+      ctx.fillStyle = "rgba(90,150,70,0.9)"; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.arc(px, py + wob, r, 0.35, Math.PI * 2 - 0.35); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "rgba(160,200,120,0.5)"; ctx.beginPath(); ctx.arc(px - r * 0.3, py + wob - r * 0.3, r * 0.35, 0, Math.PI * 2); ctx.fill();
+    }
+    // reeds (swaying)
+    ctx.strokeStyle = "rgba(60,95,35,0.85)"; ctx.lineWidth = 2; ctx.lineCap = "round";
+    for (let i = 0; i < 9; i++) {
+      const rx = z.x + 12 + ((i * 97) % Math.max(1, z.w - 24)), ry = z.y + z.h - 6 - ((i * 53) % Math.max(20, z.h * 0.5)), hgt = 22 + (i % 3) * 8, sway = Math.sin(waveT * 1.6 + i) * 3;
+      ctx.beginPath(); ctx.moveTo(rx, ry); ctx.quadraticCurveTo(rx + sway, ry - hgt * 0.6, rx + sway * 1.6, ry - hgt); ctx.stroke();
     }
     ctx.lineCap = "butt";
   }
@@ -976,6 +1016,7 @@ export function createGame(canvas, opts) {
     const f = fit(v.world.w, v.world.h);
     ctx.setTransform(backK * f.s, 0, 0, backK * f.s, backK * f.ox, backK * f.oy);
     drawWater(v.world.w, v.world.h, waveT);
+    for (const z of v.swamps || []) drawSwamp(z);
     drawShore(v.world.w, v.world.h);
     drawScenery(v.world.w, v.world.h);
     for (const o of v.obstacles) drawBrygga(o);
@@ -1204,6 +1245,7 @@ export function createGame(canvas, opts) {
       sw: authoritative ? swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
       self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
+      swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),
       saved: saved.length,
     }),
