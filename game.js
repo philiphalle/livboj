@@ -6,7 +6,7 @@ import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/n
 const APP_ID = "livboj-bookbeat-9f3a";
 const MAX_PLAYERS = 12;
 const SHORE_H = 70; // beach band along the bottom; rescued swimmers gather here
-const EAT_DWELL = 1.1; // seconds a monster must hold a swimmer before eating it
+const EAT_DWELL = 1.25; // seconds a monster must hold a swimmer before eating it
 const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 
 // STUN + a public best-effort TURN relay so most NATs can connect without setup.
@@ -21,14 +21,15 @@ const RTC = {
 };
 
 const BASE_LEVELS = [
+  // allowedMisses scales with the quota (~20%) so late levels stay fair.
   { quota: 5,  spawn: 1300, speed: 22, sink: 10.0, maxOnScreen: 4,  allowedMisses: 6 },
   { quota: 8,  spawn: 1100, speed: 32, sink: 9.0,  maxOnScreen: 5,  allowedMisses: 6 },
   { quota: 12, spawn: 950,  speed: 44, sink: 8.5,  maxOnScreen: 6,  allowedMisses: 5 },
-  { quota: 16, spawn: 820,  speed: 56, sink: 8.0,  maxOnScreen: 7,  allowedMisses: 5 },
-  { quota: 20, spawn: 700,  speed: 68, sink: 7.5,  maxOnScreen: 8,  allowedMisses: 5 },
-  { quota: 26, spawn: 620,  speed: 78, sink: 7.0,  maxOnScreen: 9,  allowedMisses: 4 },
-  { quota: 32, spawn: 540,  speed: 88, sink: 6.5,  maxOnScreen: 10, allowedMisses: 4 },
-  { quota: 40, spawn: 470,  speed: 98, sink: 6.0,  maxOnScreen: 11, allowedMisses: 4 },
+  { quota: 16, spawn: 820,  speed: 56, sink: 8.0,  maxOnScreen: 7,  allowedMisses: 6 },
+  { quota: 20, spawn: 700,  speed: 68, sink: 7.5,  maxOnScreen: 8,  allowedMisses: 6 },
+  { quota: 26, spawn: 620,  speed: 78, sink: 7.0,  maxOnScreen: 9,  allowedMisses: 6 },
+  { quota: 32, spawn: 540,  speed: 88, sink: 6.5,  maxOnScreen: 10, allowedMisses: 7 },
+  { quota: 40, spawn: 470,  speed: 98, sink: 6.0,  maxOnScreen: 11, allowedMisses: 8 },
 ];
 const SKINS = ["#f7d3ad", "#e8b98f", "#c98d61", "#a86a44", "#f2c39b"];
 const HAIRS = ["#3a2a1c", "#221b16", "#6b4a2a", "#0f0f10", "#8a5a2b", "#c9a24a"];
