@@ -118,7 +118,8 @@
 
   const params = new URLSearchParams(location.search);
   if (params.get("room")) codeEl.value = params.get("room").toUpperCase();
-  try { nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
+  // restore the saved name, but never over something typed while the code was loading
+  try { if (!nameEl.value) nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
 
   let joinedRoom = "";
   watchUpdates(build, {

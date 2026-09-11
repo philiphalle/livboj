@@ -141,7 +141,8 @@
   const shareLine = document.getElementById("shareLine");
   const boardEl = document.getElementById("board");
 
-  try { nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
+  // restore the saved name, but never over something typed while the code was loading
+  try { if (!nameEl.value) nameEl.value = localStorage.getItem("livboj-name") || ""; } catch {}
 
   const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   const params = new URLSearchParams(location.search);
