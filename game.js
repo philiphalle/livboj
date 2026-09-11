@@ -222,7 +222,8 @@ export function createGame(canvas, opts) {
   function recordResult() {
     const entry = {
       score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(),
-      players: [...players.values()].map((p) => (p.id === selfId ? myName : p.name) || "Spelare"),
+      // team total in `score`; per-player breakdown here, best first.
+      players: [...players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0 })).sort((a, b) => b.score - a.score),
     };
     board.push(entry);
     board.sort((a, b) => b.score - a.score || b.ts - a.ts);
@@ -923,9 +924,10 @@ export function createGame(canvas, opts) {
     ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(sub, CW / 2, y); y += 34;
     ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText("🏆 Topplista", CW / 2, y); y += 26;
     const b = v.board || [];
+    const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
-    else b.slice(0, 5).forEach((e, i) => { const names = (e.players || []).join(", "); ctx.fillText(`${i + 1}.  ${e.score} p  —  ${names}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
+    else b.slice(0, 5).forEach((e, i) => { ctx.fillText(`${i + 1}.  Lag ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
     if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på blanksteg för lobbyn", CW / 2, y); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
