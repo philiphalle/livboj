@@ -6,6 +6,7 @@ import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/n
 const APP_ID = "livboj-bookbeat-9f3a";
 const MAX_PLAYERS = 12;
 const SHORE_H = 70; // beach band along the bottom; rescued swimmers gather here
+const EAT_DWELL = 1.1; // seconds a monster must hold a swimmer before eating it
 const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 
 // STUN + a public best-effort TURN relay so most NATs can connect without setup.
@@ -118,7 +119,7 @@ const sChomp = () => { beep(95, 0.22, "sawtooth", 0.06, 0); beep(60, 0.2, "sawto
 const sStun = () => { unlockAudio(); beep(300, 0.1, "square", 0.05, 0); beep(230, 0.1, "square", 0.05, 0.09); beep(180, 0.13, "square", 0.045, 0.18); };
 
 // Loch Ness monsters appear from level 3 and hunt swimmers (never the livboj).
-function monstersForLevel(idx) { return idx >= 2 ? Math.min(idx - 1, 4) : 0; }
+function monstersForLevel(idx) { return idx >= 2 ? Math.min(idx - 1, 3) : 0; }
 
 // ---- Leaderboard (persisted in the host's browser) ------------------------
 function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-leaderboard") || "[]"); } catch { return []; } }
@@ -343,10 +344,11 @@ export function createGame(canvas, opts) {
   }
 
   function updateMonsters(dt) {
-    const mspeed = 55 + levelIndex * 10;
+    const mspeed = 45 + levelIndex * 8;
     for (const m of monsters) {
+      m.full = Math.max(0, (m.full || 0) - dt); // satiated after a meal: drifts, doesn't hunt
       let best = null, bd = 1e9;
-      for (const s of swimmers) { const d = Math.hypot(s.x - m.x, s.y - m.y); if (d < bd) { bd = d; best = s; } }
+      if (!(m.full > 0)) for (const s of swimmers) { const d = Math.hypot(s.x - m.x, s.y - m.y); if (d < bd) { bd = d; best = s; } }
       if (best) { const ang = Math.atan2(best.y - m.y, best.x - m.x); const k = Math.min(1, dt * 1.8); m.vx += (Math.cos(ang) * mspeed - m.vx) * k; m.vy += (Math.sin(ang) * mspeed - m.vy) * k; }
       else if (Math.hypot(m.vx, m.vy) < 12) { const a = Math.random() * Math.PI * 2; m.vx = Math.cos(a) * mspeed; m.vy = Math.sin(a) * mspeed; }
       m.x += m.vx * dt; m.y += m.vy * dt; m.wob = (m.wob || 0) + dt * 3;
@@ -395,10 +397,14 @@ export function createGame(canvas, opts) {
         if (caught >= L.quota) { phase = Phase.CLEARED; sClear(); emitPhase(); pushState(); return; }
         continue;
       }
-      // Eaten by a Loch Ness monster? (counts as a miss; the livboj is safe.)
-      let eaten = false;
-      for (const m of monsters) { if (Math.hypot(s.x - m.x, s.y - m.y) < m.r + s.r) { eaten = true; break; } }
-      if (eaten) {
+      // Loch Ness monster: must hold a swimmer for EAT_DWELL seconds before
+      // eating it (a red danger ring rises) so a rescue can still snatch them
+      // back; a satiated monster can't bite. Counts as a miss; livboj is safe.
+      let biter = null;
+      for (const m of monsters) { if (!(m.full > 0) && Math.hypot(s.x - m.x, s.y - m.y) < m.r + s.r) { biter = m; break; } }
+      s.chomp = biter ? (s.chomp || 0) + dt : Math.max(0, (s.chomp || 0) - dt * 1.5);
+      if (biter && s.chomp >= EAT_DWELL) {
+        biter.full = 1.5;
         missed++; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 2]); sChomp();
         swimmers.splice(i, 1);
         if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
@@ -441,7 +447,7 @@ export function createGame(canvas, opts) {
       hostId: selfId, phase, levelIndex, score, caught, missed, timeLeft,
       quota: phase === Phase.LOBBY ? 0 : L.quota, allowedMisses: L.allowedMisses, world, introTimer,
       obstacles: obstacles.map((o) => [o.x, o.y, o.w, o.h]),
-      swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr]),
+      swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr, +Math.min(1, (s.chomp || 0) / EAT_DWELL).toFixed(2)]),
       monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
       players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
       fx: fxOut,
@@ -466,7 +472,7 @@ export function createGame(canvas, opts) {
     for (const s of d.swimmers || []) {
       seen.add(s[0]);
       const cur = iSwim.get(s[0]) || { x: s[1], y: s[2] };
-      cur.tx = s[1]; cur.ty = s[2]; cur.r = s[3]; cur.frac = s[4]; cur.sk = s[5]; cur.hr = s[6];
+      cur.tx = s[1]; cur.ty = s[2]; cur.r = s[3]; cur.frac = s[4]; cur.sk = s[5]; cur.hr = s[6]; cur.ch = s[7] || 0;
       if (cur.x === undefined) { cur.x = s[1]; cur.y = s[2]; }
       iSwim.set(s[0], cur);
     }
@@ -794,6 +800,9 @@ export function createGame(canvas, opts) {
     ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
     ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
     ctx.lineCap = "butt";
+    // danger ring: a monster is holding this swimmer — rises red until eaten
+    const ch = s.ch != null ? s.ch : Math.min(1, (s.chomp || 0) / EAT_DWELL);
+    if (ch > 0) { ctx.strokeStyle = `rgba(255,70,60,${0.35 + 0.45 * ch})`; ctx.lineWidth = 2 + 4 * ch; ctx.beginPath(); ctx.arc(0, 0, gr + 6 + Math.sin(t * 14) * 1.5 * ch, 0, Math.PI * 2); ctx.stroke(); }
 
     // --- submerged (refracted + water-tinted, depth fade) ---
     const refr = Math.sin(t * 2) * R * 0.06, kick = Math.sin(t * 2.2);
