@@ -203,7 +203,9 @@ export function createGame(canvas, opts) {
     sendInput = (inp) => { try { A.inp[0](inp); } catch {} };
     sendHello = (d) => { try { A.hi[0](d); } catch {} };
     const iv = setInterval(() => { if (!lastView) sendHello({ name: myName }); else clearInterval(iv); }, 700);
-    setInterval(() => { if (!authoritative && sendInput) sendInput({ x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0, stun: selfPos.stun > 0 ? 1 : 0 }); }, 50);
+    // Only report a position once seeded from the host's PLAY snapshot for
+    // this level — otherwise the initial (0,0) would override the spawn slot.
+    setInterval(() => { if (!authoritative && sendInput && selfPos.seeded) sendInput({ x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0, stun: selfPos.stun > 0 ? 1 : 0 }); }, 50);
   }
   function startBroadcast() { if (broadcasting) return; broadcasting = true; setInterval(() => { if (authoritative && room) pushState(); }, 50); }
 
