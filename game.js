@@ -98,6 +98,7 @@ const sStart = () => { unlockAudio(); [440, 620, 840].forEach((f, i) => beep(f, 
 const sTick = () => { beep(900, 0.05, "square", 0.045, 0); };
 const sJoin = () => { unlockAudio(); beep(600, 0.08, "sine", 0.05, 0); beep(900, 0.09, "sine", 0.05, 0.08); };
 const sChomp = () => { beep(95, 0.22, "sawtooth", 0.06, 0); beep(60, 0.2, "sawtooth", 0.05, 0.1); };
+const sStun = () => { unlockAudio(); beep(300, 0.1, "square", 0.05, 0); beep(230, 0.1, "square", 0.05, 0.09); beep(180, 0.13, "square", 0.045, 0.18); };
 
 // Loch Ness monsters appear from level 3 and hunt swimmers (never the livboj).
 function monstersForLevel(idx) { return idx >= 2 ? Math.min(idx - 1, 3) : 0; }
@@ -178,7 +179,7 @@ export function createGame(canvas, opts) {
     sendInput = (inp) => { try { A.inp[0](inp); } catch {} };
     sendHello = (d) => { try { A.hi[0](d); } catch {} };
     const iv = setInterval(() => { if (!lastView) sendHello({ name: myName }); else clearInterval(iv); }, 700);
-    setInterval(() => { if (!authoritative && sendInput) sendInput({ x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0 }); }, 50);
+    setInterval(() => { if (!authoritative && sendInput) sendInput({ x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0, stun: selfPos.stun > 0 ? 1 : 0 }); }, 50);
   }
   function startBroadcast() { if (broadcasting) return; broadcasting = true; setInterval(() => { if (authoritative && room) pushState(); }, 50); }
 
@@ -196,6 +197,7 @@ export function createGame(canvas, opts) {
       p.x = Math.max(p.r, Math.min(world.w - p.r, data.x));
       p.y = Math.max(p.r, Math.min(world.h - p.r, data.y));
       p.dashActive = data.dash ? 0.18 : 0;
+      p.stunned = !!data.stun;
     }
   }
   function rosterList() { return [...players.values()].map((p) => ({ id: p.id, name: p.id === selfId ? myName : p.name, you: p.id === selfId })); }
@@ -226,6 +228,7 @@ export function createGame(canvas, opts) {
     arr.forEach((p, i) => { const a = (i / arr.length) * Math.PI * 2; p.x = world.w / 2 + Math.cos(a) * ring; p.y = world.h / 2 + Math.sin(a) * ring; p.dashActive = 0; p.dashCooldown = 0; });
     const me = players.get(selfId);
     selfPos.x = me ? me.x : world.w / 2; selfPos.y = me ? me.y : world.h / 2;
+    selfPos.stun = 0; selfPos.stunCd = 0;
     // Loch Ness monsters (level 3+): spawn near the edges, away from the middle.
     monsters = [];
     const mc = monstersForLevel(idx);
@@ -320,9 +323,14 @@ export function createGame(canvas, opts) {
 
     // Only the local player is integrated here; remote players own their own
     // position and report it via applyPeerInput, so what each client sees is real.
-    const meP = players.get(selfId); if (meP) movePlayer(meP, dt, localInput());
-    if (meP) { selfPos.x = meP.x; selfPos.y = meP.y; }
-    for (const p of players.values()) { p.dashActive = Math.max(0, p.dashActive - (p.id === selfId ? 0 : dt)); }
+    const meP = players.get(selfId);
+    selfPos.stun = Math.max(0, (selfPos.stun || 0) - dt);
+    selfPos.stunCd = Math.max(0, (selfPos.stunCd || 0) - dt);
+    if (meP && selfPos.stun <= 0 && selfPos.stunCd <= 0) {
+      for (const m of monsters) { if (Math.hypot(meP.x - m.x, meP.y - m.y) < m.r + meP.r) { selfPos.stun = 1.0; selfPos.stunCd = 1.5; sStun(); break; } }
+    }
+    if (meP) { movePlayer(meP, dt, selfPos.stun > 0 ? { dx: 0, dy: 0, dash: false } : localInput()); meP.stunned = selfPos.stun > 0; selfPos.x = meP.x; selfPos.y = meP.y; }
+    for (const p of players.values()) { if (p.id !== selfId) p.dashActive = Math.max(0, p.dashActive - dt); }
     dashTap = false;
 
     timeLeft -= dt;
@@ -372,7 +380,12 @@ export function createGame(canvas, opts) {
 
   function updateJoin(dt) {
     if (!lastView || lastView.phase !== Phase.PLAY) return;
-    const input = localInput();
+    selfPos.stun = Math.max(0, (selfPos.stun || 0) - dt);
+    selfPos.stunCd = Math.max(0, (selfPos.stunCd || 0) - dt);
+    if (selfPos.stun <= 0 && selfPos.stunCd <= 0) {
+      for (const mm of iMonster.values()) { if (Math.hypot(selfPos.x - mm.x, selfPos.y - mm.y) < (mm.r || 30) + selfPos.r) { selfPos.stun = 1.0; selfPos.stunCd = 1.5; sStun(); break; } }
+    }
+    const input = selfPos.stun > 0 ? { dx: 0, dy: 0, dash: false } : localInput();
     selfPos.dashActive = Math.max(0, selfPos.dashActive - dt);
     selfPos.dashCd = Math.max(0, selfPos.dashCd - dt);
     if (input.dash && selfPos.dashCd === 0) { selfPos.dashActive = 0.18; selfPos.dashCd = 0.9; sDash(); }
@@ -395,7 +408,7 @@ export function createGame(canvas, opts) {
       obstacles: obstacles.map((o) => [o.x, o.y, o.w, o.h]),
       swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr]),
       monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
-      players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0]),
+      players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0]),
       fx: fxOut,
       board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board : undefined,
     };
@@ -436,13 +449,13 @@ export function createGame(canvas, opts) {
     for (const p of d.players || []) {
       seenP.add(p[0]);
       const cur = iPlayer.get(p[0]) || { x: p[1], y: p[2] };
-      cur.id = p[0]; cur.tx = p[1]; cur.ty = p[2]; cur.name = p[3]; cur.dash = p[4]; cur.hue = p[5]; cur.rescues = p[6] || 0;
+      cur.id = p[0]; cur.tx = p[1]; cur.ty = p[2]; cur.name = p[3]; cur.dash = p[4]; cur.hue = p[5]; cur.rescues = p[6] || 0; cur.stun = p[7] || 0;
       if (cur.x === undefined) { cur.x = p[1]; cur.y = p[2]; }
       iPlayer.set(p[0], cur);
     }
     for (const id of [...iPlayer.keys()]) if (!seenP.has(id)) iPlayer.delete(id);
     for (const e of d.fx || []) { jSplashes.push({ x: e[0], y: e[1], t: 0, good: e[2] === 1 }); (e[2] === 1 ? sRescue : e[2] === 2 ? sChomp : sMiss)(); }
-    if (!selfPos.seeded && d.phase === Phase.PLAY) { const meP = (d.players || []).find((p) => p[0] === selfId); if (meP) { selfPos.x = meP[1]; selfPos.y = meP[2]; selfPos.seeded = true; } }
+    if (!selfPos.seeded && d.phase === Phase.PLAY) { const meP = (d.players || []).find((p) => p[0] === selfId); if (meP) { selfPos.x = meP[1]; selfPos.y = meP[2]; selfPos.seeded = true; selfPos.stun = 0; selfPos.stunCd = 0; } }
     if (d.phase === Phase.LOBBY || d.phase === Phase.INTRO) selfPos.seeded = false;
     if (prevPhase !== d.phase) { if (d.phase === Phase.PLAY) { jLastSec = Math.ceil(d.timeLeft); sStart(); } else if (d.phase === Phase.CLEARED) sClear(); else if (d.phase === Phase.OVER) sOver(); else if (d.phase === Phase.WIN) sWin(); cbs.onPhase && cbs.onPhase(d.phase); }
     cbs.onRoster && cbs.onRoster((d.players || []).map((p) => ({ id: p[0], name: p[0] === selfId ? myName : p[3], you: p[0] === selfId })));
@@ -548,8 +561,9 @@ export function createGame(canvas, opts) {
     ctx.fillStyle = "#5c3a1e"; const ps = 7;
     [[o.x, o.y], [o.x + o.w - ps, o.y], [o.x, o.y + o.h - ps], [o.x + o.w - ps, o.y + o.h - ps]].forEach(([x, y]) => ctx.fillRect(x, y, ps, ps));
   }
-  function drawLivboj(x, y, r, hue, glow, label, you) {
+  function drawLivboj(x, y, r, hue, glow, label, you, stunned) {
     ctx.save(); ctx.translate(x, y);
+    if (stunned) ctx.globalAlpha = 0.6 + 0.25 * Math.sin(waveT * 20);
     if (hue != null) { ctx.strokeStyle = `hsl(${hue},85%,60%)`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, r + 5, 0, Math.PI * 2); ctx.stroke(); }
     if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 20; }
     ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); ctx.fillStyle = "#f4571d"; ctx.fill("evenodd"); ctx.shadowBlur = 0;
@@ -558,6 +572,8 @@ export function createGame(canvas, opts) {
     ctx.strokeStyle = "rgba(0,0,0,0.28)"; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
     if (label) { ctx.fillStyle = you ? "#ffd7c7" : "#eaf6ff"; ctx.font = "700 14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(you ? "Du" : label, 0, -r - 8); }
+    ctx.globalAlpha = 1;
+    if (stunned) { ctx.fillStyle = "#fdd23a"; ctx.font = "14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; for (let i = 0; i < 3; i++) { const a = waveT * 4 + i * (Math.PI * 2 / 3); ctx.fillText("★", Math.cos(a) * r * 0.85, -r * 0.95 + Math.sin(a) * r * 0.22); } ctx.textBaseline = "alphabetic"; }
     ctx.restore();
   }
   function drawSwimmer(s) {
@@ -589,32 +605,91 @@ export function createGame(canvas, opts) {
       const dp = (((s.bob || 0) * 0.5 + ph + k) % 1 + 1) % 1, dr = 2 * (1 - dp);
       if (dr > 0.5) { ctx.beginPath(); ctx.arc(cx + R * 1.3, cy - 10 - dp * 14 - wave, dr, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx - R * 1.3, cy - 10 - dp * 14 + wave, dr, 0, Math.PI * 2); ctx.fill(); }
     }
+    // hair BEHIND the head for long styles (drawn first)
+    const style = (s.id || 0) % 5;
+    ctx.fillStyle = hair;
+    if (style === 2) { ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.15, R * 0.9, R * 0.85, 0, 0, Math.PI * 2); ctx.fill(); } // long hair
     // head
     ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(cx, cy, R * 0.8, 0, Math.PI * 2); ctx.fill();
-    // hair — two styles depending on the swimmer
+    // hair styles on top
     ctx.fillStyle = hair;
-    if ((s.id || 0) % 2 === 0) { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.8, Math.PI * 1.03, Math.PI * 1.97); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.28, R * 0.6, Math.PI, 0); ctx.fill(); }
-    else { ctx.beginPath(); ctx.arc(cx, cy - R * 0.08, R * 0.82, Math.PI * 0.96, Math.PI * 2.04); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.56, R * 0.26, 0, Math.PI * 2); ctx.fill(); }
-    // eyes + worried brows + open mouth
-    ctx.fillStyle = "#2a2320"; ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#2a2320"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx - R * 0.42, cy - 6); ctx.lineTo(cx - R * 0.14, cy - 8); ctx.moveTo(cx + R * 0.14, cy - 8); ctx.lineTo(cx + R * 0.42, cy - 6); ctx.stroke();
-    ctx.fillStyle = "#6e3b32"; ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.42, 2.6, 3.3, 0, 0, Math.PI * 2); ctx.fill();
+    if (style === 0) { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.8, Math.PI * 1.03, Math.PI * 1.97); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.28, R * 0.6, Math.PI, 0); ctx.fill(); } // short
+    else if (style === 1) { ctx.beginPath(); ctx.arc(cx, cy - R * 0.06, R * 0.82, Math.PI * 0.96, Math.PI * 2.04); ctx.fill(); ctx.beginPath(); ctx.arc(cx, cy - R * 0.62, R * 0.28, 0, Math.PI * 2); ctx.fill(); } // top bun
+    else if (style === 2) { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.82, Math.PI, Math.PI * 2); ctx.fill(); } // long (cap over the behind-hair)
+    else if (style === 3) { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.78, Math.PI, Math.PI * 2); ctx.fill(); for (let k = -2; k <= 2; k++) { const a = cx + k * R * 0.28; ctx.beginPath(); ctx.moveTo(a - R * 0.14, cy - R * 0.4); ctx.lineTo(a, cy - R * 0.85); ctx.lineTo(a + R * 0.14, cy - R * 0.4); ctx.closePath(); ctx.fill(); } } // spiky
+    else { ctx.beginPath(); ctx.arc(cx, cy - 2, R * 0.8, Math.PI * 1.05, Math.PI * 1.95); ctx.fill(); ctx.beginPath(); ctx.arc(cx - R * 0.72, cy + R * 0.05, R * 0.26, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 0.72, cy + R * 0.05, R * 0.26, 0, Math.PI * 2); ctx.fill(); } // pigtails
+
+    // eyes — blink occasionally
+    const blink = Math.sin((s.bob || 0) * 0.9 + (s.id || 0) * 1.3) > 0.95;
+    ctx.strokeStyle = "#2a2320"; ctx.fillStyle = "#2a2320"; ctx.lineWidth = 1.6;
+    if (blink) { ctx.beginPath(); ctx.moveTo(cx - R * 0.38, cy - 1); ctx.lineTo(cx - R * 0.18, cy - 1); ctx.moveTo(cx + R * 0.18, cy - 1); ctx.lineTo(cx + R * 0.38, cy - 1); ctx.stroke(); }
+    else { ctx.beginPath(); ctx.arc(cx - R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(cx + R * 0.28, cy - 1, 2, 0, Math.PI * 2); ctx.fill(); }
+    // worried brows
+    ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx - R * 0.42, cy - 6); ctx.lineTo(cx - R * 0.14, cy - 8); ctx.moveTo(cx + R * 0.14, cy - 8); ctx.lineTo(cx + R * 0.42, cy - 6); ctx.stroke();
+    // mouth opens & closes (shouting for help)
+    const gape = 1.4 + (Math.sin((s.bob || 0) * 3) + 1) * 2.2;
+    ctx.fillStyle = "#6e3b32"; ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.44, 2.8, gape, 0, 0, Math.PI * 2); ctx.fill();
+    // occasional panic bubble
+    const bp = (((s.bob || 0) * 0.4 + (s.id || 0)) % 1 + 1) % 1;
+    if (bp < 0.5) { ctx.strokeStyle = "rgba(210,235,247,0.6)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx + R * 0.5, cy - R * 0.6 - bp * R, 1.5 + bp * 2, 0, Math.PI * 2); ctx.stroke(); }
   }
   function drawSplash(sp) { const p = sp.t / 0.6; ctx.strokeStyle = sp.good ? `rgba(120,230,160,${1 - p})` : `rgba(230,120,120,${1 - p})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sp.x, sp.y, 6 + p * 26, 0, Math.PI * 2); ctx.stroke(); }
   function drawMonster(m) {
-    const R = m.r || 30, wob = Math.sin(m.wob || 0) * 2, flip = Math.cos(m.dir || 0) < 0 ? -1 : 1;
-    ctx.save(); ctx.translate(m.x, m.y + wob); ctx.scale(flip, 1);
-    ctx.strokeStyle = "rgba(200,230,240,0.22)"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.ellipse(0, R * 0.45, R * 1.7, R * 0.7, 0, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = "#2c5f34";
-    for (let i = 0; i < 3; i++) { const hx = -R * 1.1 + i * R * 0.55, hr = R * 0.34 - i * 3; ctx.beginPath(); ctx.arc(hx, 0, hr, Math.PI, 0); ctx.fill(); }
-    ctx.fillStyle = "#3a7d44"; ctx.beginPath(); ctx.ellipse(-R * 0.2, R * 0.05, R * 0.82, R * 0.5, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#3a7d44"; ctx.lineWidth = R * 0.4; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(R * 0.3, R * 0.05); ctx.quadraticCurveTo(R * 0.85, -R * 0.7, R * 0.98, -R * 1.02); ctx.stroke();
-    ctx.fillStyle = "#3a7d44"; ctx.beginPath(); ctx.ellipse(R * 1.05, -R * 1.04, R * 0.33, R * 0.24, -0.3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#2c5f34"; ctx.beginPath(); ctx.arc(R * 1.02, -R * 1.24, R * 0.1, Math.PI, 0); ctx.fill();
-    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(R * 1.16, -R * 1.08, 3.2, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(R * 1.19, -R * 1.08, 1.7, 0, Math.PI * 2); ctx.fill();
+    const R = m.r || 30, t = m.wob || 0, flip = Math.cos(m.dir || 0) < 0 ? -1 : 1, bob = Math.sin(t) * 2;
+    ctx.save(); ctx.translate(m.x, m.y + bob); ctx.scale(flip, 1);
+    const body = ctx.createLinearGradient(0, -R, 0, R); body.addColorStop(0, "#4f9e58"); body.addColorStop(1, "#245f35");
+    const dark = "#1f4f2b";
+
+    // wake + foam bubbles behind
+    ctx.strokeStyle = "rgba(210,235,245,0.22)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(-R * 0.2, R * 0.5, R * 1.95, R * 0.72, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "rgba(222,242,250,0.4)";
+    for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.arc(-R * 1.6 - i * R * 0.42, R * 0.4 + Math.sin(t * 2 + i) * 3, 3 - i * 0.5, 0, Math.PI * 2); ctx.fill(); }
+
+    // tail with fin
+    ctx.fillStyle = "#2b6b3a";
+    ctx.beginPath(); ctx.moveTo(-R * 1.45, 0); ctx.quadraticCurveTo(-R * 2.1, -R * 0.1 + Math.sin(t * 1.5) * R * 0.22, -R * 2.25, -R * 0.55);
+    ctx.lineTo(-R * 1.95, -R * 0.12); ctx.quadraticCurveTo(-R * 2.05, R * 0.25, -R * 1.45, R * 0.22); ctx.closePath(); ctx.fill();
+
+    // back humps + dorsal spikes (undulating)
+    for (let i = 0; i < 3; i++) {
+      const hx = -R * 1.15 + i * R * 0.6, hy = Math.sin(t * 1.6 + i * 0.9) * R * 0.14, hr = R * 0.4 - i * 2;
+      ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(hx - hr * 0.4, hy); ctx.lineTo(hx, hy - hr * 1.15); ctx.lineTo(hx + hr * 0.4, hy); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = body; ctx.beginPath(); ctx.arc(hx, hy, hr, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.12)"; ctx.beginPath(); ctx.arc(hx - hr * 0.2, hy - hr * 0.12, hr * 0.5, Math.PI, 0); ctx.fill();
+    }
+
+    // main body + belly + scales + side fin
+    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.98, R * 0.58, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(206,228,158,0.5)"; ctx.beginPath(); ctx.ellipse(-R * 0.1, R * 0.3, R * 0.72, R * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    for (let i = 0; i < 8; i++) { ctx.beginPath(); ctx.arc(-R * 0.7 + i * R * 0.2, -R * 0.08 + (i % 2) * R * 0.14, 2, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = "#2b6b3a"; ctx.beginPath(); ctx.moveTo(-R * 0.1, R * 0.3);
+    ctx.quadraticCurveTo(-R * 0.4, R * 0.95 + Math.sin(t * 2) * R * 0.12, -R * 0.62, R * 0.7); ctx.quadraticCurveTo(-R * 0.3, R * 0.5, -R * 0.1, R * 0.3); ctx.fill();
+
+    // neck (thick, curved, sways) + ridge spikes
+    const sway = Math.sin(t * 1.2) * R * 0.08;
+    ctx.strokeStyle = body; ctx.lineWidth = R * 0.44; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(R * 0.35, R * 0.02); ctx.quadraticCurveTo(R * 0.85 + sway, -R * 0.7, R * 0.98 + sway, -R * 1.05); ctx.stroke();
+    ctx.fillStyle = dark;
+    for (let i = 0; i < 3; i++) { const nt = 0.4 + i * 0.2, nx = R * (0.42 + nt * 0.58) + sway * nt, ny = R * (0.02 - 1.1 * nt * nt); ctx.beginPath(); ctx.moveTo(nx - 3, ny); ctx.lineTo(nx, ny - 6); ctx.lineTo(nx + 3, ny); ctx.closePath(); ctx.fill(); }
+
+    // head (animated mouth + teeth + eye)
+    ctx.save(); ctx.translate(R * 1.02 + sway, -R * 1.08); ctx.rotate(-0.35);
+    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.44, R * 0.31, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(R * 0.36, R * 0.06, R * 0.21, R * 0.16, 0, 0, Math.PI * 2); ctx.fill();
+    const gape = (Math.sin(t * 3) + 1) / 2 * R * 0.16 + 1.5;
+    ctx.fillStyle = "#7a1f22"; ctx.beginPath();
+    ctx.moveTo(R * 0.2, R * 0.12); ctx.lineTo(R * 0.56, R * 0.12 - gape * 0.3); ctx.lineTo(R * 0.56, R * 0.12 + gape); ctx.lineTo(R * 0.2, R * 0.12 + gape * 0.4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#fff";
+    for (let i = 0; i < 3; i++) { const tx = R * 0.28 + i * R * 0.09; ctx.beginPath(); ctx.moveTo(tx, R * 0.12); ctx.lineTo(tx + 3, R * 0.12); ctx.lineTo(tx + 1.5, R * 0.12 + 3.5); ctx.closePath(); ctx.fill(); }
+    ctx.fillStyle = "#173d20"; ctx.beginPath(); ctx.arc(R * 0.52, R * 0.0, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(-R * 0.06, -R * 0.24); ctx.lineTo(R * 0.02, -R * 0.44); ctx.lineTo(R * 0.11, -R * 0.2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#fdd23a"; ctx.beginPath(); ctx.arc(R * 0.06, -R * 0.05, R * 0.14, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#111"; ctx.beginPath(); ctx.ellipse(R * 0.09, -R * 0.05, R * 0.055, R * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(R * 0.12, -R * 0.1, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
     ctx.restore(); ctx.lineCap = "butt";
   }
 
@@ -630,7 +705,7 @@ export function createGame(canvas, opts) {
     for (const s of v.swimmers) drawSwimmer(s);
     for (const m of v.monsters || []) drawMonster(m);
     if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
-    for (const p of v.players) drawLivboj(p.x, p.y, p.r || 30, p.hue, p.id === selfId && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, p.id === selfId);
+    for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     drawHUD(v); drawScoreboard(v); drawOverlays(v); drawMute();
   }
