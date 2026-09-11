@@ -558,6 +558,17 @@ export function createGame(canvas, opts) {
     const g = ctx.createLinearGradient(0, 0, 0, h);
     g.addColorStop(0, "#155273"); g.addColorStop(0.5, "#0f4363"); g.addColorStop(1, "#0a2f45");
     ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    // drifting caustic light patches (skipped when the water is crowded)
+    if (!lowFx) {
+      for (let i = 0; i < 7; i++) {
+        const cx = ((i * 173 + Math.sin(t * 0.35 + i) * 60) % (w + 200) + w + 200) % (w + 200) - 100;
+        const cy = ((i * 131 + Math.cos(t * 0.28 + i * 1.7) * 40) % (h + 200) + h + 200) % (h + 200) - 100;
+        const rad = 70 + (i % 3) * 35;
+        const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+        cg.addColorStop(0, "rgba(120,200,235,0.07)"); cg.addColorStop(1, "rgba(120,200,235,0)");
+        ctx.fillStyle = cg; ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
+      }
+    }
     // three parallax wave layers for depth
     const layers = [
       { amp: 5, k: 0.016, sp: 0.6, op: 0.05, step: 26 },
@@ -687,14 +698,28 @@ export function createGame(canvas, opts) {
     ctx.lineCap = "butt";
   }
   function drawBrygga(o) {
-    ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(o.x + 4, o.y + 7, o.w, o.h);
-    ctx.fillStyle = "#7a4f2a"; ctx.fillRect(o.x, o.y, o.w, o.h);
-    ctx.strokeStyle = "rgba(40,24,10,0.5)"; ctx.lineWidth = 2;
-    const horiz = o.w >= o.h, nn = Math.max(3, Math.round((horiz ? o.w : o.h) / 26));
-    for (let i = 1; i < nn; i++) { if (horiz) { const x = o.x + (o.w / nn) * i; ctx.beginPath(); ctx.moveTo(x, o.y); ctx.lineTo(x, o.y + o.h); ctx.stroke(); } else { const y = o.y + (o.h / nn) * i; ctx.beginPath(); ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y); ctx.stroke(); } }
-    ctx.fillStyle = "rgba(212,172,122,0.55)"; ctx.fillRect(o.x, o.y, o.w, 3);
-    ctx.fillStyle = "#5c3a1e"; const ps = 7;
-    [[o.x, o.y], [o.x + o.w - ps, o.y], [o.x, o.y + o.h - ps], [o.x + o.w - ps, o.y + o.h - ps]].forEach(([x, y]) => ctx.fillRect(x, y, ps, ps));
+    const horiz = o.w >= o.h;
+    // soft drop shadow into the water
+    ctx.fillStyle = "rgba(0,10,20,0.28)"; ctx.fillRect(o.x + 5, o.y + 8, o.w, o.h);
+    // wood: rounded-beam shading across the short axis (light from top-left)
+    const wg = horiz ? ctx.createLinearGradient(0, o.y, 0, o.y + o.h) : ctx.createLinearGradient(o.x, 0, o.x + o.w, 0);
+    wg.addColorStop(0, "#a8713d"); wg.addColorStop(0.35, "#8a5a2e"); wg.addColorStop(1, "#5e3a1c");
+    ctx.fillStyle = wg; ctx.fillRect(o.x, o.y, o.w, o.h);
+    // planks: dark seam + light bevel beside it
+    const nn = Math.max(3, Math.round((horiz ? o.w : o.h) / 26));
+    ctx.lineWidth = 1.5;
+    for (let i = 1; i < nn; i++) {
+      if (horiz) { const x = o.x + (o.w / nn) * i; ctx.strokeStyle = "rgba(35,20,8,0.6)"; ctx.beginPath(); ctx.moveTo(x, o.y); ctx.lineTo(x, o.y + o.h); ctx.stroke(); ctx.strokeStyle = "rgba(255,225,190,0.14)"; ctx.beginPath(); ctx.moveTo(x + 1.5, o.y); ctx.lineTo(x + 1.5, o.y + o.h); ctx.stroke(); }
+      else { const y = o.y + (o.h / nn) * i; ctx.strokeStyle = "rgba(35,20,8,0.6)"; ctx.beginPath(); ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y); ctx.stroke(); ctx.strokeStyle = "rgba(255,225,190,0.14)"; ctx.beginPath(); ctx.moveTo(o.x, y + 1.5); ctx.lineTo(o.x + o.w, y + 1.5); ctx.stroke(); }
+    }
+    // faint grain
+    ctx.strokeStyle = "rgba(60,35,15,0.18)"; ctx.lineWidth = 1;
+    for (let k = 0; k < 3; k++) { if (horiz) { const y = o.y + o.h * (0.25 + k * 0.25); ctx.beginPath(); ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y + (k % 2 ? 1 : -1)); ctx.stroke(); } else { const x = o.x + o.w * (0.25 + k * 0.25); ctx.beginPath(); ctx.moveTo(x, o.y); ctx.lineTo(x + (k % 2 ? 1 : -1), o.y + o.h); ctx.stroke(); } }
+    // lit top edge + dark far edge, corner posts
+    ctx.fillStyle = "rgba(255,225,185,0.5)"; ctx.fillRect(o.x, o.y, horiz ? o.w : 3, horiz ? 3 : o.h);
+    ctx.fillStyle = "rgba(20,10,4,0.45)"; if (horiz) ctx.fillRect(o.x, o.y + o.h - 3, o.w, 3); else ctx.fillRect(o.x + o.w - 3, o.y, 3, o.h);
+    ctx.fillStyle = "#4d2f16"; const ps = 7;
+    [[o.x, o.y], [o.x + o.w - ps, o.y], [o.x, o.y + o.h - ps], [o.x + o.w - ps, o.y + o.h - ps]].forEach(([x, y]) => { ctx.fillRect(x, y, ps, ps); ctx.fillStyle = "rgba(255,225,185,0.35)"; ctx.fillRect(x, y, ps, 2); ctx.fillStyle = "#4d2f16"; });
   }
   function drawLivboj(x, y, r, hue, glow, label, you, stunned) {
     ctx.save(); ctx.translate(x, y);
@@ -886,13 +911,26 @@ export function createGame(canvas, opts) {
     ctx.restore(); ctx.lineCap = "butt";
   }
 
+  // HiDPI backing store: draw in logical CW×CH coords but back the canvas with
+  // (displayed size × devicePixelRatio) pixels so text and edges stay crisp.
+  let backK = 1, lastClientW = 0, lastDpr = 0;
+  function fitBacking() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2), cw = canvas.clientWidth;
+    if (!cw || (cw === lastClientW && dpr === lastDpr)) return;
+    lastClientW = cw; lastDpr = dpr;
+    const w = Math.round(cw * dpr), h = Math.round(w * CH / CW);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    backK = canvas.width / CW;
+  }
+  function resetBase() { ctx.setTransform(backK, 0, 0, backK, 0, 0); }
+
   function render() {
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH);
+    resetBase(); ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH);
     const v = currentView();
     if (!v) { drawWaitScreen("Ansluter…"); return; }
     if (v.phase === Phase.LOBBY) { drawLobbyScreen(v); return; }
     const f = fit(v.world.w, v.world.h);
-    ctx.setTransform(f.s, 0, 0, f.s, f.ox, f.oy);
+    ctx.setTransform(backK * f.s, 0, 0, backK * f.s, backK * f.ox, backK * f.oy);
     drawWater(v.world.w, v.world.h, waveT);
     drawShore(v.world.w, v.world.h);
     drawScenery(v.world.w, v.world.h);
@@ -904,7 +942,7 @@ export function createGame(canvas, opts) {
     if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     drawSeagulls(v.world.w, waveT);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    resetBase();
     drawHUD(v); drawScoreboard(v); drawOverlays(v); drawMute();
   }
   function drawWaitScreen(msg) {
@@ -987,6 +1025,7 @@ export function createGame(canvas, opts) {
   let last = performance.now();
   function frame(now) {
     let dt = (now - last) / 1000; last = now; if (dt > 0.05) dt = 0.05; waveT += dt;
+    fitBacking();
     if (authoritative) updateSim(dt); else updateJoin(dt);
     updateSaved(dt);
     if (!authoritative && lastView) {
