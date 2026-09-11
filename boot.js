@@ -27,7 +27,7 @@ export async function currentBuild() {
 export async function loadGame() {
   const build = await currentBuild();
   const mod = await import(build ? `./game.js?v=${encodeURIComponent(build)}` : "./game.js");
-  return { createGame: mod.createGame, build };
+  return { createGame: mod.createGame, fetchGlobalBoard: mod.fetchGlobalBoard, build };
 }
 
 /**

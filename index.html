@@ -65,6 +65,20 @@
   .hostlink { text-align: center; color: #a9d6ec; font-size: 14px; font-weight: 600; text-decoration: none; padding-top: 2px; }
   .hostlink:hover { color: #fff; }
 
+  /* Menu + global leaderboard side by side; stacked on narrow screens */
+  .cards { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 18px; max-height: 72vh; overflow: auto; }
+  .boardcard { gap: 10px; }
+  .boardhead { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .boardhead h2 { margin: 0; font-size: 16px; font-weight: 800; color: var(--accent); }
+  .boardhead .src { font-size: 12px; color: var(--muted); }
+  .board { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .board li { background: rgba(255, 255, 255, 0.04); border-radius: 10px; padding: 7px 11px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .board li.top1 { background: rgba(244, 87, 29, 0.16); }
+  .board .who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .board .who b { color: #ffd7c7; }
+  .board .sc { color: var(--accent); font-weight: 800; white-space: nowrap; }
+  .board .empty { color: var(--muted); font-size: 13px; justify-content: center; }
+
   canvas { background: #0e3b52; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
 
@@ -81,6 +95,7 @@
     <p class="tag">Rädda simmarna innan de sjunker</p>
   </div>
 
+  <div class="cards" id="cards">
   <div id="menu" class="card">
     <div class="field">
       <label for="name">Ditt namn (krävs)</label>
@@ -98,6 +113,15 @@
     <a class="hostlink" href="host.html">Skapa ett eget spel (bli värd) →</a>
   </div>
 
+  <div id="boardcard" class="card boardcard" aria-live="polite">
+    <div class="boardhead">
+      <h2>🏆 Topplista</h2>
+      <span class="src" id="boardSrc">hämtar…</span>
+    </div>
+    <ol class="board" id="board"><li class="empty">Hämtar topplistan…</li></ol>
+  </div>
+  </div>
+
   <canvas id="game" width="900" height="600" hidden></canvas>
   <div class="hint">
     Dator: <kbd>← ↑ → ↓</kbd> styr · <kbd>Blanksteg</kbd> spurt · <kbd>Enter</kbd> nästa nivå (värd) · <kbd>M</kbd> ljud. &nbsp;Mobil: dra + tryck <b>Spurt</b>.
@@ -108,13 +132,39 @@
   import { loadGame, watchUpdates } from "./boot.js";
   // Always the latest build (see boot.js); the watcher reloads the menu
   // silently on a new build and shows a banner if a game is in progress.
-  const { createGame, build } = await loadGame();
+  const { createGame, fetchGlobalBoard, build } = await loadGame();
 
   const nameEl = document.getElementById("name");
   const codeEl = document.getElementById("code");
   const menu = document.getElementById("menu");
+  const cards = document.getElementById("cards");
   const brand = document.getElementById("brand");
   const canvas = document.getElementById("game");
+
+  // Global leaderboard (same list the host lobby shows), refreshed while the menu is open.
+  const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc");
+  async function refreshBoard() {
+    if (cards.hidden) return;
+    const list = fetchGlobalBoard ? await fetchGlobalBoard() : null;
+    if (!list) { boardSrc.textContent = "nås inte just nu"; if (!boardEl.querySelector("li:not(.empty)")) boardEl.innerHTML = '<li class="empty">Topplistan nås inte just nu</li>'; return; }
+    boardSrc.textContent = "global · alla värdar";
+    boardEl.innerHTML = "";
+    if (!list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än — bli först!</li>'; return; }
+    list.slice(0, 10).forEach((e, i) => {
+      const li = document.createElement("li"); if (i === 0) li.className = "top1";
+      const who = document.createElement("span"); who.className = "who";
+      const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
+      const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+      who.textContent = `${i + 1}. `;
+      if (e.team) { const b = document.createElement("b"); b.textContent = e.team; who.append(b, document.createTextNode(" — ")); }
+      who.append(document.createTextNode(`${names} · Nivå ${e.level} · ${ds}`));
+      who.title = who.textContent;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.team ? "" : "Lag "}${e.score} p`;
+      li.append(who, sc); boardEl.appendChild(li);
+    });
+  }
+  refreshBoard(); setInterval(refreshBoard, 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshBoard(); });
 
   const params = new URLSearchParams(location.search);
   if (params.get("room")) codeEl.value = params.get("room").toUpperCase();
@@ -134,7 +184,7 @@
     return n;
   }
   function show(mode, room) {
-    menu.hidden = true; brand.hidden = true; canvas.hidden = false;
+    menu.hidden = true; cards.hidden = true; brand.hidden = true; canvas.hidden = false;
     joinedRoom = mode === "join" ? room : "";
     window.livboj = createGame(canvas, { mode, name: name(), room });
   }

@@ -196,7 +196,7 @@ function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-lead
 function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b.slice(0, 50))); } catch {} }
 function withEntryId(e) { return e.id ? e : { ...e, id: `${e.ts}-${e.score}-${e.level}-${(e.players || []).map((p) => (typeof p === "string" ? p : p.name)).join("+")}`.slice(0, 48) }; }
 const sortBoard = (b) => b.sort((a, c) => c.score - a.score || c.ts - a.ts);
-async function fetchGlobalBoard() {
+export async function fetchGlobalBoard() {
   if (!RELAY_HTTP) return null;
   try { const r = await fetch(`${RELAY_HTTP}/board`, { cache: "no-store" }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
 }
