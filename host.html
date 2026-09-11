@@ -165,8 +165,9 @@
       const li = document.createElement("li");
       const left = document.createElement("span");
       const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
-      left.textContent = `${i + 1}. ${(e.players || []).join(", ")} · Nivå ${e.level} · ${ds}`;
-      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.score} p`;
+      const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+      left.textContent = `${i + 1}. ${names} · Nivå ${e.level} · ${ds}`;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `Lag ${e.score} p`;
       li.append(left, sc); boardEl.appendChild(li);
     });
   }
