@@ -43,7 +43,16 @@ const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 // Optional WebSocket relay (see relay/README.md), for networks that block
 // peer-to-peer/WebRTC — most offices. Set it here, or per session via
 // ?relay=wss://… (the host's invite link carries it along to joiners).
-const RELAY_URL = (() => { try { return new URLSearchParams(location.search).get("relay") || ""; } catch { return ""; } })();
+// Default transport: the WebSocket relay (works on office networks that block
+// WebRTC). ?relay=wss://… overrides it; ?relay=off forces plain P2P.
+const RELAY_DEFAULT = "wss://livboj-relay.livboj.workers.dev";
+const RELAY_URL = (() => {
+  try {
+    const q = new URLSearchParams(location.search).get("relay");
+    if (q === null || q === "") return RELAY_DEFAULT;
+    return /^(off|p2p|0|none)$/i.test(q) ? "" : q;
+  } catch { return RELAY_DEFAULT; }
+})();
 // Optional forced signaling strategy (?sig=nostr|mqtt|torrent). The host's
 // invite link carries its resolved choice so joiners land on the same one.
 const SIG_PARAM = (() => { try { return new URLSearchParams(location.search).get("sig") || ""; } catch { return ""; } })();
@@ -1361,6 +1370,7 @@ export function createGame(canvas, opts) {
       rescues: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
       sw: authoritative ? swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
       self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
+      players: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),

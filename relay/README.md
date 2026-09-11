@@ -19,17 +19,19 @@ Workers + Durable Objects — free tier is plenty.
 
 ## Point the game at it
 
-Either test first without redeploying the game, by adding the relay to the URL
-(both host and joiners must use it):
+The game already uses `wss://livboj-relay.livboj.workers.dev` by default
+(`RELAY_DEFAULT` at the top of `game.js`). If you redeploy under another
+name or account, change that constant and push.
+
+Per-session overrides, for testing (the host's invite link carries the same
+`relay` parameter, so joiners follow automatically):
 
 ```
+# a different relay
 https://philiphalle.github.io/livboj/host.html?relay=wss://livboj-relay.<you>.workers.dev
+# plain peer-to-peer (WebRTC), no relay
+https://philiphalle.github.io/livboj/host.html?relay=off
 ```
-
-The host's invite link automatically carries the same `relay` parameter.
-
-Or make it the default: set `RELAY_URL` at the top of `game.js` to
-`wss://livboj-relay.<you>.workers.dev` and push.
 
 ## Local test (no account needed)
 
