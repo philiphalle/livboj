@@ -285,7 +285,11 @@ export function createGame(canvas, opts) {
     if (n.transport === "relay") return `Nätverk: reläserver ${n.relayOpen ? "ansluten ✓" : "ansluter…"} · ${n.peers} medspelare`;
     const sig = n.signaling.total ? `signalering ${n.signaling.open}/${n.signaling.total}` : "signalering …";
     const ice = !n.ice.done ? "testar STUN/TURN…" : `STUN ${n.ice.srflx ? "✓" : "✗"} · TURN ${n.ice.relay ? "✓" : "✗"}`;
-    const warn = n.ice.done && !n.ice.srflx && !n.ice.relay ? " — nätverket verkar blockera P2P" : (n.signaling.total && !n.signaling.open ? " — kan inte nå signaleringen" : "");
+    // TURN unreachable means peers on a locked-down LAN (client isolation / no
+    // hairpin) have no fallback path: point straight at the relay.
+    const warn = n.ice.done && !n.ice.srflx && !n.ice.relay ? " — nätverket verkar blockera P2P: använd reläservern (relay/README.md)"
+      : (n.signaling.total && !n.signaling.open ? " — kan inte nå signaleringen"
+      : (n.ice.done && !n.ice.relay ? " — dyker ingen upp? kontorsnät kräver ofta reläservern (relay/README.md)" : ""));
     return `Nätverk: P2P via ${SIGNAL.name} · ${sig} · ${ice} · ${n.peers} medspelare${warn}`;
   }
   function drawNetLine() {
