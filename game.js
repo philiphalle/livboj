@@ -1,7 +1,37 @@
 // Livbojen — shared engine: solo / host / join.
 // Host-authoritative co-op over WebRTC P2P (Trystero, Nostr signaling), with
 // STUN+TURN for NAT traversal and host migration if the host leaves.
-import { joinRoom, selfId, getRelaySockets } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
+// Three signaling strategies (all public, no account). The game probes which
+// one this network can actually reach and joins through that — corporate
+// networks often block one set of hosts but not another.
+import * as NOSTR from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
+import * as MQTT from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/mqtt/+esm";
+import * as TORRENT from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/torrent/+esm";
+let selfId = NOSTR.selfId; // re-pointed to the chosen strategy's id before any use
+const SIGNAL = { name: "nostr", mod: NOSTR };
+const getRelaySockets = () => (SIGNAL.mod && typeof SIGNAL.mod.getRelaySockets === "function" ? SIGNAL.mod.getRelaySockets() : {});
+function pickSignaling(timeoutMs = 4500) {
+  const cands = [
+    // Probe every relay of a strategy (any one opening is enough): the list's
+    // first few Nostr relays are often dead while later ones are fine.
+    { name: "nostr", mod: NOSTR, urls: NOSTR.defaultRelayUrls || [] },
+    { name: "mqtt", mod: MQTT, urls: MQTT.defaultRelayUrls || ["wss://broker.hivemq.com:8884/mqtt", "wss://broker.emqx.io:8084/mqtt"] },
+    { name: "torrent", mod: TORRENT, urls: TORRENT.defaultTrackerUrls || TORRENT.defaultRelayUrls || ["wss://tracker.openwebtorrent.com", "wss://tracker.webtorrent.dev"] },
+  ];
+  // Sequential, Nostr-first: only fall back when the preferred strategy's
+  // signaling can't be reached. (A pure race picked whichever broker answered
+  // first, which split peers across strategies.) `forced` skips the probe.
+  const forced = cands.find((c) => c.name === arguments[1]);
+  if (forced) return Promise.resolve(forced);
+  const probe = (urls, ms) => new Promise((resolve) => {
+    let done = false, pending = urls.length; const socks = [];
+    const finish = (ok) => { if (done) return; done = true; for (const s of socks) { try { s.close(); } catch {} } resolve(ok); };
+    if (!pending) return finish(false);
+    for (const u of urls) { try { const s = new WebSocket(u); socks.push(s); s.onopen = () => finish(true); s.onerror = () => { if (--pending <= 0) finish(false); }; } catch { if (--pending <= 0) finish(false); } }
+    setTimeout(() => finish(false), ms);
+  });
+  return (async () => { for (const c of cands) { if (await probe(c.urls, timeoutMs)) return c; } return cands[0]; })();
+}
 
 const APP_ID = "livboj-bookbeat-9f3a";
 const MAX_PLAYERS = 12;
@@ -14,6 +44,9 @@ const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 // peer-to-peer/WebRTC — most offices. Set it here, or per session via
 // ?relay=wss://… (the host's invite link carries it along to joiners).
 const RELAY_URL = (() => { try { return new URLSearchParams(location.search).get("relay") || ""; } catch { return ""; } })();
+// Optional forced signaling strategy (?sig=nostr|mqtt|torrent). The host's
+// invite link carries its resolved choice so joiners land on the same one.
+const SIG_PARAM = (() => { try { return new URLSearchParams(location.search).get("sig") || ""; } catch { return ""; } })();
 
 const RTC = {
   iceServers: [
@@ -253,7 +286,7 @@ export function createGame(canvas, opts) {
     const sig = n.signaling.total ? `signalering ${n.signaling.open}/${n.signaling.total}` : "signalering …";
     const ice = !n.ice.done ? "testar STUN/TURN…" : `STUN ${n.ice.srflx ? "✓" : "✗"} · TURN ${n.ice.relay ? "✓" : "✗"}`;
     const warn = n.ice.done && !n.ice.srflx && !n.ice.relay ? " — nätverket verkar blockera P2P" : (n.signaling.total && !n.signaling.open ? " — kan inte nå signaleringen" : "");
-    return `Nätverk: P2P · ${sig} · ${ice} · ${n.peers} medspelare${warn}`;
+    return `Nätverk: P2P via ${SIGNAL.name} · ${sig} · ${ice} · ${n.peers} medspelare${warn}`;
   }
   function drawNetLine() {
     if (mode === "solo") return;
@@ -262,8 +295,15 @@ export function createGame(canvas, opts) {
   }
 
   function setupNet(asHost) {
-    room = RELAY_URL ? relayJoin(RELAY_URL, opts.room) : joinRoom({ appId: APP_ID, rtcConfig: RTC }, opts.room);
-    if (!RELAY_URL) runIceProbe();
+    const go = (r) => { room = r; wireRoom(asHost); };
+    if (RELAY_URL) { go(relayJoin(RELAY_URL, opts.room)); return; }
+    runIceProbe();
+    pickSignaling(3500, SIG_PARAM).then((c) => {
+      SIGNAL.name = c.name; SIGNAL.mod = c.mod; SIGNAL.resolved = true; if (c.mod.selfId) selfId = c.mod.selfId;
+      go(c.mod.joinRoom({ appId: APP_ID, rtcConfig: RTC }, opts.room));
+    });
+  }
+  function wireRoom(asHost) {
     A.st = room.makeAction("st");
     A.inp = room.makeAction("inp");
     A.hi = room.makeAction("hi");
@@ -1304,6 +1344,7 @@ export function createGame(canvas, opts) {
 
   return {
     hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
+    signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
     _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,
