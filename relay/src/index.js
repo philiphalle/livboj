@@ -85,10 +85,14 @@ function sanitize(e) {
   const score = int(e.score, 0, 1_000_000), level = int(e.level, 1, 20), ts = int(e.ts, 0, 4_102_444_800_000);
   if (score === null || level === null || ts === null) return null;
   const players = Array.isArray(e.players)
-    ? e.players.slice(0, 12).map((p) => (typeof p === "string" ? { name: str(p, 14), score: 0 } : { name: str(p && p.name, 14) || "Spelare", score: int(p && p.score, 0, 1_000_000) || 0 }))
+    ? e.players.slice(0, 12).map((p) => (typeof p === "string" ? { name: str(p, 14), score: 0, rescues: 0 } : { name: str(p && p.name, 14) || "Spelare", score: int(p && p.score, 0, 1_000_000) || 0, rescues: int(p && p.rescues, 0, 100_000) || 0 }))
     : [];
   const id = str(e.id, 48) || `${ts}-${score}-${level}-${players.map((p) => p.name).join("+")}`.slice(0, 48);
-  return { id, score, level, won: !!e.won, n: int(e.n, 1, 12) || players.length || 1, ts, team: str(e.team, 20), players };
+  return {
+    id, score, level, won: !!e.won, n: int(e.n, 1, 12) || players.length || 1, ts, team: str(e.team, 20), players,
+    // extra stats (0 for entries from before they existed)
+    duration: int(e.duration, 0, 86_400) || 0, rescued: int(e.rescued, 0, 100_000) || 0, combo: int(e.combo, 0, 100_000) || 0,
+  };
 }
 const order = (a, b) => b.score - a.score || b.ts - a.ts;
 

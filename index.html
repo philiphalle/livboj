@@ -78,6 +78,12 @@
   .board .who b { color: #ffd7c7; }
   .board .sc { color: var(--accent); font-weight: 800; white-space: nowrap; }
   .board .empty { color: var(--muted); font-size: 13px; justify-content: center; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tab { border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05); color: var(--muted); border-radius: 999px;
+    padding: 5px 11px; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+  .tab:hover { color: var(--ink); }
+  .tab.on { background: rgba(244, 87, 29, 0.22); border-color: rgba(244, 87, 29, 0.6); color: #ffd7c7; }
+  .tab:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35); }
 
   canvas { background: #0e3b52; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
@@ -118,6 +124,7 @@
       <h2>🏆 Topplista</h2>
       <span class="src" id="boardSrc">hämtar…</span>
     </div>
+    <div class="tabs" id="boardTabs" role="tablist"></div>
     <ol class="board" id="board"><li class="empty">Hämtar topplistan…</li></ol>
   </div>
   </div>
@@ -141,29 +148,58 @@
   const brand = document.getElementById("brand");
   const canvas = document.getElementById("game");
 
-  // Global leaderboard (same list the host lobby shows), refreshed while the menu is open.
-  const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc");
-  async function refreshBoard() {
-    if (cards.hidden) return;
-    const list = fetchGlobalBoard ? await fetchGlobalBoard() : null;
-    if (!list) { boardSrc.textContent = "nås inte just nu"; if (!boardEl.querySelector("li:not(.empty)")) boardEl.innerHTML = '<li class="empty">Topplistan nås inte just nu</li>'; return; }
-    boardSrc.textContent = "global · alla värdar";
+  // Global leaderboard, refreshed while the menu is open. One shared list of
+  // finished games (solo and hosted); the tabs are different views of it.
+  const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc"), tabsEl = document.getElementById("boardTabs");
+  const TABS = [["lag", "Lag"], ["spelare", "Spelare"], ["raddade", "Räddade"], ["kombo", "Kombo"], ["speltid", "Speltid"]];
+  let tab = "lag"; try { tab = localStorage.getItem("livboj-board-tab") || "lag"; } catch {}
+  if (!TABS.some(([k]) => k === tab)) tab = "lag";
+  let entries = null;
+  const fmtDate = (ts) => { const d = new Date(ts); return `${d.getDate()}/${d.getMonth() + 1}`; };
+  const fmtDur = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const teamOf = (e) => e.team || (e.n === 1 ? "Solo" : "Lag");
+  const names = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+  const byTs = (a, b) => b.ts - a.ts;
+  function rowsFor(key, list) {
+    const P = () => list.flatMap((e) => (e.players || []).filter((p) => typeof p !== "string").map((p) => ({ ...p, e })));
+    switch (key) {
+      case "spelare": return P().sort((a, b) => b.score - a.score || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.score} p` }));
+      case "raddade": return P().filter((p) => p.rescues > 0).sort((a, b) => b.rescues - a.rescues || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.rescues} räddade` }));
+      case "kombo": return list.filter((e) => e.combo > 0).sort((a, b) => b.combo - a.combo || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · ${fmtDate(e.ts)}`], sc: `${e.combo} i rad` }));
+      case "speltid": return list.filter((e) => e.duration > 0).sort((a, b) => b.duration - a.duration || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: fmtDur(e.duration) }));
+      default: return list.slice().sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
+    }
+  }
+  function renderTabs() {
+    tabsEl.innerHTML = "";
+    for (const [k, label] of TABS) {
+      const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "tab"); b.setAttribute("aria-selected", String(k === tab));
+      b.className = "tab" + (k === tab ? " on" : ""); b.textContent = label;
+      b.onclick = () => { tab = k; try { localStorage.setItem("livboj-board-tab", k); } catch {} renderTabs(); renderBoard(); };
+      tabsEl.appendChild(b);
+    }
+  }
+  function renderBoard() {
+    if (!entries) return;
     boardEl.innerHTML = "";
-    if (!list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än — bli först!</li>'; return; }
-    list.slice(0, 10).forEach((e, i) => {
+    const rows = rowsFor(tab, entries);
+    if (!rows.length) { boardEl.innerHTML = `<li class="empty">${entries.length ? "Inga resultat i den här listan än" : "Inga resultat än — bli först!"}</li>`; return; }
+    rows.forEach((r, i) => {
       const li = document.createElement("li"); if (i === 0) li.className = "top1";
       const who = document.createElement("span"); who.className = "who";
-      const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
-      const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
-      who.textContent = `${i + 1}. `;
-      if (e.team) { const b = document.createElement("b"); b.textContent = e.team; who.append(b, document.createTextNode(" — ")); }
-      who.append(document.createTextNode(`${names} · Nivå ${e.level} · ${ds}`));
-      who.title = who.textContent;
-      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.team ? "" : "Lag "}${e.score} p`;
+      const b = document.createElement("b"); b.textContent = r.who[0];
+      who.append(document.createTextNode(`${i + 1}. `), b, document.createTextNode(r.who[1])); who.title = who.textContent;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = r.sc;
       li.append(who, sc); boardEl.appendChild(li);
     });
   }
-  refreshBoard(); setInterval(refreshBoard, 60 * 1000);
+  async function refreshBoard() {
+    if (cards.hidden) return;
+    const list = fetchGlobalBoard ? await fetchGlobalBoard() : null;
+    if (!list) { boardSrc.textContent = "nås inte just nu"; if (!entries) boardEl.innerHTML = '<li class="empty">Topplistan nås inte just nu</li>'; return; }
+    boardSrc.textContent = "global · alla spel"; entries = list; renderBoard();
+  }
+  renderTabs(); refreshBoard(); setInterval(refreshBoard, 60 * 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshBoard(); });
 
   const params = new URLSearchParams(location.search);

@@ -175,7 +175,7 @@
     }
   }
   function renderBoard(list, source) {
-    boardSourceEl.textContent = source === "global" ? "global · alla värdar" : "lokal kopia · reläservern nås inte";
+    boardSourceEl.textContent = source === "global" ? "global · alla spel" : "lokal kopia · reläservern nås inte";
     boardEl.innerHTML = "";
     if (!list || !list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än</li>'; return; }
     list.slice(0, 10).forEach((e, i) => {
@@ -183,8 +183,8 @@
       const left = document.createElement("span");
       const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
       const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
-      left.textContent = `${i + 1}. ${e.team ? e.team + " — " : ""}${names} · Nivå ${e.level} · ${ds}`;
-      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.team ? "" : "Lag "}${e.score} p`;
+      left.textContent = `${i + 1}. ${e.team || (e.n === 1 ? "Solo" : "Lag")} — ${names} · Nivå ${e.level} · ${ds}`;
+      const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.score} p`;
       li.append(left, sc); boardEl.appendChild(li);
     });
   }

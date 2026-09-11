@@ -228,6 +228,12 @@ export function createGame(canvas, opts) {
   let hostId = authoritative ? selfId : null;
   let fxOut = []; // rescue/miss events to broadcast this tick
   let lastSec = 999, jLastSec = 999; // countdown-tick trackers
+  // Per-game stats for the leaderboard: time played, swimmers rescued, best rescue streak.
+  let gameStartAt = 0, totalCaught = 0, combo = 0, bestCombo = 0;
+  function beginGame() {
+    gameStartAt = performance.now(); totalCaught = 0; combo = 0; bestCombo = 0; levelIndex = 0; score = 0;
+    for (const p of players.values()) { p.rescues = 0; p.score = 0; }
+  }
   let board = loadBoard(); // leaderboard (global when the relay answers, else the local cache)
   let boardSource = "local"; // "global" once the relay has answered
   let netBoard = []; // leaderboard received from the host (joiners)
@@ -280,7 +286,7 @@ export function createGame(canvas, opts) {
   let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
 
   // ---- Setup --------------------------------------------------------------
-  function setupSolo() { addPlayer(selfId, myName); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
+  function setupSolo() { addPlayer(selfId, myName); beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
   // ---- Relay transport: same surface as a Trystero room (tuple actions,
   // onPeerJoin/Leave, getPeers) but over one plain WebSocket to the relay.
   function relayJoin(url, roomId) {
@@ -413,7 +419,7 @@ export function createGame(canvas, opts) {
   function emitBoard() { cbs.onBoard && cbs.onBoard(board, boardSource); }
   function adoptBoard(list, source) {
     board = sortBoard(list.map(withEntryId)); boardSource = source; saveBoardLS(board); emitBoard();
-    if (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) pushState(); // joiners see it too
+    if (room && (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN)) pushState(); // joiners see it too
   }
   // Host: sync with the global list. The local cache is always posted (the
   // relay dedupes by id, so this is idempotent) — that uploads a pre-global
@@ -427,12 +433,14 @@ export function createGame(canvas, opts) {
   function recordResult() {
     const entry = withEntryId({
       score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(), team: myTeam,
+      duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: totalCaught, combo: bestCombo,
       // team total in `score`; per-player breakdown here, best first.
-      players: [...players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0 })).sort((a, b) => b.score - a.score),
+      players: [...players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 })).sort((a, b) => b.score - a.score),
     });
     board.push(entry); sortBoard(board); board = board.slice(0, 50);
     saveBoardLS(board); emitBoard();
-    if (mode === "host") postGlobalBoard([entry]).then((merged) => { if (merged) adoptBoard(merged, "global"); });
+    // solo, host and a promoted host all post; joiners never do
+    if (authoritative) postGlobalBoard([entry]).then((merged) => { if (merged) adoptBoard(merged, "global"); });
   }
   function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); } // local cache only
 
@@ -486,7 +494,7 @@ export function createGame(canvas, opts) {
   }
   function hostStart() {
     if (!authoritative || phase !== Phase.LOBBY) return;
-    startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); pushState();
+    beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); pushState();
   }
   function nextLevel() {
     levelIndex++;
@@ -504,7 +512,7 @@ export function createGame(canvas, opts) {
     if (phase === Phase.INTRO) { if (mode === "solo") { phase = Phase.PLAY; emitPhase(); } return; }
     if (phase === Phase.CLEARED) { nextLevel(); return; }
     if (phase === Phase.OVER || phase === Phase.WIN) {
-      if (mode === "solo" && !promoted) { levelIndex = 0; score = 0; startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
+      if (mode === "solo" && !promoted) { beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
       else toLobby();
     }
   }
@@ -596,7 +604,8 @@ export function createGame(canvas, opts) {
       if (rescuer) {
         // Gentle ramp: 10 points on level 1 -> 24 on level 8. Credited to the
         // team total AND to the player whose ring touched the swimmer.
-        caught++; const pts = 10 + levelIndex * 2; score += pts;
+        caught++; totalCaught++; combo++; if (combo > bestCombo) bestCombo = combo;
+        const pts = 10 + levelIndex * 2; score += pts;
         rescuer.rescues = (rescuer.rescues || 0) + 1; rescuer.score = (rescuer.score || 0) + pts;
         splashes.push({ x: s.x, y: s.y, t: 0, good: true }); fxOut.push([Math.round(s.x), Math.round(s.y), 1, s.sk, s.hr, s.id]); sRescue(); spawnSaved(s.x, s.y, s.sk, s.hr, s.id);
         swimmers.splice(i, 1);
@@ -611,13 +620,13 @@ export function createGame(canvas, opts) {
       s.chomp = biter ? (s.chomp || 0) + dt : Math.max(0, (s.chomp || 0) - dt * 1.5);
       if (biter && s.chomp >= EAT_DWELL) {
         biter.full = 1.5;
-        missed++; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 2]); sChomp();
+        missed++; combo = 0; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 2]); sChomp();
         swimmers.splice(i, 1);
         if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
         continue;
       }
       if (s.life <= 0) {
-        missed++; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 0]); sMiss();
+        missed++; combo = 0; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 0]); sMiss();
         swimmers.splice(i, 1);
         if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
       }
@@ -1343,7 +1352,7 @@ export function createGame(canvas, opts) {
     const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
-    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || "Lag"} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
+    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || (e.n === 1 ? "Solo" : "Lag")} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
     if (authoritative) { drawActionButton("Till lobbyn", CW / 2 - 100, y - 4); drawLeaveButton(CW / 2 + 110, y - 4); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); drawLeaveButton(CW / 2, y + 34); }
@@ -1410,7 +1419,7 @@ export function createGame(canvas, opts) {
   canvas.addEventListener("touchend", (e) => { e.preventDefault(); if (e.touches.length === 0) pointerTarget = null; }, { passive: false });
 
   // ---- Boot ---------------------------------------------------------------
-  if (mode === "solo") setupSolo();
+  if (mode === "solo") { setupSolo(); initGlobalBoard(); }
   else if (mode === "host") { setupNet(true); initGlobalBoard(); }
   else setupNet(false);
   requestAnimationFrame(frame);
