@@ -168,6 +168,9 @@ export function createGame(canvas, opts) {
   let electing = false, electAt = 0;
   const DASH_BTN = { x: CW - 66, y: CH - 66, r: 46 };
   const MUTE_BTN = { x: 28, y: CH - 28, r: 16 };
+  const QUIT_BTN = { x: CW - 132, y: 44, w: 114, h: 24 }; // host-only "Avsluta spelet"
+  let quitArmedUntil = 0; // two-tap confirm so nobody quits by accident
+  let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
 
   // ---- Setup --------------------------------------------------------------
   function setupSolo() { addPlayer(selfId, myName); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
@@ -271,6 +274,7 @@ export function createGame(canvas, opts) {
     const me = players.get(selfId);
     selfPos.x = me ? me.x : world.w / 2; selfPos.y = me ? me.y : world.h / 2;
     selfPos.stun = 0; selfPos.stunCd = 0;
+    levelStartScore = new Map([...players.values()].map((p) => [p.id, p.score || 0]));
     // Loch Ness monsters (level 3+): spawn near the edges, away from the middle.
     monsters = [];
     const mc = monstersForLevel(idx);
@@ -499,7 +503,7 @@ export function createGame(canvas, opts) {
     for (const e of d.fx || []) { jSplashes.push({ x: e[0], y: e[1], t: 0, good: e[2] === 1 }); if (e[2] === 1) { sRescue(); spawnSaved(e[0], e[1], e[3], e[4], e[5]); } else (e[2] === 2 ? sChomp : sMiss)(); }
     if (!selfPos.seeded && d.phase === Phase.PLAY) { const meP = (d.players || []).find((p) => p[0] === selfId); if (meP) { selfPos.x = meP[1]; selfPos.y = meP[2]; selfPos.seeded = true; selfPos.stun = 0; selfPos.stunCd = 0; } }
     if (d.phase === Phase.LOBBY || d.phase === Phase.INTRO) selfPos.seeded = false;
-    if (prevPhase !== d.phase) { if (d.phase === Phase.INTRO || d.phase === Phase.LOBBY) saved = []; if (d.phase === Phase.PLAY) { jLastSec = Math.ceil(d.timeLeft); sStart(); } else if (d.phase === Phase.CLEARED) sClear(); else if (d.phase === Phase.OVER) sOver(); else if (d.phase === Phase.WIN) sWin(); cbs.onPhase && cbs.onPhase(d.phase); }
+    if (prevPhase !== d.phase) { if (d.phase === Phase.INTRO || d.phase === Phase.LOBBY) { saved = []; levelStartScore = new Map((d.players || []).map((p) => [p[0], p[8] || 0])); } if (d.phase === Phase.PLAY) { jLastSec = Math.ceil(d.timeLeft); sStart(); } else if (d.phase === Phase.CLEARED) sClear(); else if (d.phase === Phase.OVER) sOver(); else if (d.phase === Phase.WIN) sWin(); cbs.onPhase && cbs.onPhase(d.phase); }
     cbs.onRoster && cbs.onRoster((d.players || []).map((p) => ({ id: p[0], name: p[0] === selfId ? myName : p[3], you: p[0] === selfId })));
   }
 
@@ -576,20 +580,36 @@ export function createGame(canvas, opts) {
         ctx.fillStyle = cg; ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
       }
     }
-    // three parallax wave layers for depth
+    // translucent surface layer: lighter, glassier near the top
+    const surf = ctx.createLinearGradient(0, 0, 0, h * 0.6);
+    surf.addColorStop(0, "rgba(150,212,242,0.13)"); surf.addColorStop(1, "rgba(150,212,242,0)");
+    ctx.fillStyle = surf; ctx.fillRect(0, 0, w, h * 0.6);
+    // drifting sun-glitter patch
+    const gx = w * 0.62 + Math.sin(t * 0.21) * w * 0.16, gy = h * 0.34 + Math.cos(t * 0.16) * h * 0.1, grd = Math.min(w, h) * 0.5;
+    const sun = ctx.createRadialGradient(gx, gy, 0, gx, gy, grd);
+    sun.addColorStop(0, "rgba(200,235,255,0.11)"); sun.addColorStop(0.5, "rgba(200,235,255,0.04)"); sun.addColorStop(1, "rgba(200,235,255,0)");
+    ctx.fillStyle = sun; ctx.fillRect(gx - grd, gy - grd, grd * 2, grd * 2);
+    // moving diagonal light sweep across the surface
+    ctx.save(); ctx.translate(w / 2, h / 2); ctx.rotate(-0.35);
+    const sx = ((t * 55) % (w + 600)) - w / 2 - 300;
+    const sweep = ctx.createLinearGradient(sx - 160, 0, sx + 160, 0);
+    sweep.addColorStop(0, "rgba(255,255,255,0)"); sweep.addColorStop(0.5, "rgba(255,255,255,0.07)"); sweep.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = sweep; ctx.fillRect(sx - 160, -h, 320, h * 2);
+    ctx.restore();
+    // three parallax wave layers for depth (with relief: shadow under, light on top)
     const layers = [
       { amp: 5, k: 0.016, sp: 0.6, op: 0.05, step: 26 },
       { amp: 7, k: 0.022, sp: 1.0, op: 0.07, step: 22 },
       { amp: 4, k: 0.030, sp: 1.6, op: 0.05, step: 20 },
     ];
     const rows = Math.max(5, Math.round(h / 78));
+    const wavePath = (y0, Ly, row, dy) => { ctx.beginPath(); for (let x = 0; x <= w; x += Ly.step) { const y = y0 + dy + Math.sin(x * Ly.k + t * Ly.sp + row) * Ly.amp; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } };
     for (const Ly of layers) {
-      ctx.strokeStyle = `rgba(255,255,255,${Ly.op})`; ctx.lineWidth = 2;
       for (let row = 0; row < rows; row++) {
         const y0 = (row + 0.5) * (h / rows);
-        ctx.beginPath();
-        for (let x = 0; x <= w; x += Ly.step) { const y = y0 + Math.sin(x * Ly.k + t * Ly.sp + row) * Ly.amp; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
-        ctx.stroke();
+        // trough shadow just below the crest, then the lit crest on top
+        ctx.strokeStyle = `rgba(5,30,50,${Ly.op * 1.6})`; ctx.lineWidth = 3; wavePath(y0, Ly, row, 3); ctx.stroke();
+        ctx.strokeStyle = `rgba(255,255,255,${Ly.op * 1.3})`; ctx.lineWidth = 1.6; wavePath(y0, Ly, row, 0); ctx.stroke();
       }
     }
     // twinkling surface glints
@@ -964,7 +984,7 @@ export function createGame(canvas, opts) {
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     drawSeagulls(v.world.w, waveT);
     resetBase();
-    drawHUD(v); drawScoreboard(v); drawOverlays(v); drawMute();
+    drawHUD(v); drawScoreboard(v); drawOverlays(v); drawQuitBtn(v); drawMute();
   }
   function drawWaitScreen(msg) {
     drawLivboj(CW / 2, CH / 2 - 30, 46, null, true, null, false);
@@ -1016,9 +1036,72 @@ export function createGame(canvas, opts) {
     const prompt = (txt) => { ctx.font = "800 22px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.textAlign = "center"; ctx.fillText(txt, CW / 2, CH / 2 + 74); };
     const wait = () => { ctx.font = "600 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.textAlign = "center"; ctx.fillText("Väntar på värden…", CW / 2, CH / 2 + 74); };
     if (v.phase === Phase.INTRO) panel([`Nivå ${v.hud.level + 1}`], `Rädda ${v.hud.quota} · ${v.hud.n} spelare`);
-    else if (v.phase === Phase.CLEARED) { panel(["Nivå avklarad!"], `Poäng ${v.hud.score}`); authoritative ? prompt(usingTouch ? "Tryck för nästa nivå" : "Tryck på blanksteg för nästa nivå") : wait(); }
+    else if (v.phase === Phase.CLEARED) drawLevelBoard(v);
     else if (v.phase === Phase.OVER) drawEndScreen(["Spelet är slut"], `Totalpoäng ${v.hud.score}`, v);
     else if (v.phase === Phase.WIN) drawEndScreen(["Ni vann! 🛟", "Alla 5 nivåer klara"], `Slutpoäng ${v.hud.score}`, v);
+  }
+  // Current-round standings: every player ranked by points (used between
+  // levels and on the end screen).
+  function drawStandings(v, y, maxRows) {
+    const rows = [...(v.players || [])].map((p) => ({ name: p.id === selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, rescues: p.rescues || 0, hue: p.hue, you: p.id === selfId })).sort((a, b) => b.score - a.score).slice(0, maxRows);
+    ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.textAlign = "center"; ctx.fillText("Ställning", CW / 2, y); y += 26;
+    ctx.font = "700 16px system-ui, sans-serif";
+    rows.forEach((r, i) => {
+      const txt = `${i + 1}.  ${r.name}  —  ${r.score} p  ·  ${r.rescues} räddade`;
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = `hsl(${r.hue},85%,60%)`; ctx.beginPath(); ctx.arc(CW / 2 - tw / 2 - 14, y - 5, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = r.you ? "#ffd7c7" : "#eaf6ff"; ctx.fillText(txt, CW / 2, y); y += 23;
+    });
+    return y;
+  }
+  // Between levels: confetti, a top-three podium, the "på väg upp" riser, and
+  // a pulsing wait prompt. Only the host advances (advance() is gated).
+  function drawLevelBoard(v) {
+    const t = waveT;
+    ctx.fillStyle = "rgba(4,20,30,0.78)"; ctx.fillRect(0, 0, CW, CH);
+    const CONF = ["#ffb020", "#e5484d", "#3aa0ff", "#22c55e", "#ec4899", "#f4f4f0"];
+    for (let i = 0; i < 46; i++) {
+      const x = ((i * 197) % CW) + Math.sin(t * 1.3 + i) * 22;
+      const y = ((((t * (38 + (i % 5) * 11) + i * 53) % (CH + 40)) + CH + 40) % (CH + 40)) - 20;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(t * 2 + i); ctx.globalAlpha = 0.85; ctx.fillStyle = CONF[i % CONF.length]; ctx.fillRect(-4, -2.5, 8, 5); ctx.restore();
+    }
+    ctx.globalAlpha = 1; ctx.textAlign = "center";
+    ctx.fillStyle = "#eaf6ff"; ctx.font = "800 36px system-ui, sans-serif"; ctx.fillText(`Nivå ${v.hud.level + 1} avklarad!`, CW / 2, 74);
+    ctx.font = "500 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(`Lagets poäng ${v.hud.score}`, CW / 2, 100);
+    const rows = [...(v.players || [])].map((p) => ({ id: p.id, name: p.id === selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, rescues: p.rescues || 0, hue: p.hue, you: p.id === selfId, gain: (p.score || 0) - (levelStartScore.get(p.id) || 0) })).sort((a, b) => b.score - a.score);
+    // podium: 2nd left, 1st centre, 3rd right
+    const baseY = 300, slots = [[1, -120, 66, "#c9ced6"], [0, 0, 92, "#ffcf3d"], [2, 120, 50, "#d0894f"]];
+    for (const [rank, dx, hgt, col] of slots) {
+      const r = rows[rank]; if (!r) continue;
+      const x = CW / 2 + dx, bounce = rank === 0 ? Math.abs(Math.sin(t * 3)) * 6 : 0;
+      ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x - 44, baseY - hgt, 88, hgt, 8) : ctx.rect(x - 44, baseY - hgt, 88, hgt); ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.font = "800 26px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(rank + 1), x, baseY - hgt / 2 + 10);
+      drawLivboj(x, baseY - hgt - 24 - bounce, 18, r.hue, rank === 0, null, false, false);
+      if (rank === 0) { ctx.font = "22px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText("👑", x, baseY - hgt - 52 - bounce); }
+      ctx.textAlign = "center"; ctx.fillStyle = r.you ? "#ffd7c7" : "#eaf6ff"; ctx.font = "700 15px system-ui, sans-serif"; ctx.fillText(r.name, x, baseY + 20);
+      ctx.fillStyle = "#bfe0f2"; ctx.font = "600 13px system-ui, sans-serif"; ctx.fillText(`${r.score} p · ${r.rescues} räddade`, x, baseY + 38);
+    }
+    let y = baseY + 68;
+    // up-and-coming: biggest gain this level among players not already leading
+    const riser = rows.length > 1 ? rows.slice(1).reduce((m, r) => (r.gain > (m ? m.gain : 0) ? r : m), null) : null;
+    ctx.font = "800 16px system-ui, sans-serif"; ctx.fillStyle = "#7ee0a0";
+    if (riser && riser.gain > 0) ctx.fillText(`⬆ På väg upp: ${riser.name}  +${riser.gain} p den här nivån`, CW / 2, y);
+    else if (rows[0]) ctx.fillText(`Bra jobbat! +${rows[0].gain} p den här nivån`, CW / 2, y);
+    y += 28;
+    if (rows.length > 3) { ctx.font = "600 13px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(rows.slice(3, 12).map((r, i) => `${i + 4}. ${r.name} ${r.score} p`).join("   ·   "), CW / 2, y); }
+    ctx.globalAlpha = 0.7 + 0.3 * Math.sin(t * 3);
+    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för att starta nästa nivå" : "Tryck på blanksteg för att starta nästa nivå", CW / 2, CH - 60); }
+    else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på att värden startar nästa nivå…", CW / 2, CH - 60); }
+    ctx.globalAlpha = 1;
+  }
+  function drawQuitBtn(v) {
+    if (!authoritative || !(v.phase === Phase.PLAY || v.phase === Phase.INTRO || v.phase === Phase.CLEARED)) return;
+    const b = QUIT_BTN, arming = quitArmedUntil > performance.now();
+    ctx.fillStyle = arming ? "rgba(229,72,77,0.92)" : "rgba(255,255,255,0.10)";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(b.x, b.y, b.w, b.h, 12) : ctx.rect(b.x, b.y, b.w, b.h); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = "#fff"; ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(arming ? "Säker? Tryck igen" : "Avsluta spelet", b.x + b.w / 2, b.y + b.h / 2); ctx.textBaseline = "alphabetic";
   }
   function drawEndScreen(lines, sub, v) {
     ctx.fillStyle = "rgba(4,20,30,0.76)"; ctx.fillRect(0, 0, CW, CH);
@@ -1027,12 +1110,13 @@ export function createGame(canvas, opts) {
     ctx.fillStyle = "#eaf6ff"; ctx.font = "800 34px system-ui, sans-serif";
     for (const l of lines) { ctx.fillText(l, CW / 2, y); y += 40; }
     ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(sub, CW / 2, y); y += 34;
+    y = drawStandings(v, y, 8) + 12;
     ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText("🏆 Topplista", CW / 2, y); y += 26;
     const b = v.board || [];
     const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
-    else b.slice(0, 5).forEach((e, i) => { ctx.fillText(`${i + 1}.  Lag ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
+    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  Lag ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
     if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på blanksteg för lobbyn", CW / 2, y); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
@@ -1070,15 +1154,24 @@ export function createGame(canvas, opts) {
   function toCanvas(clientX, clientY) { const r = canvas.getBoundingClientRect(); return { x: (clientX - r.left) * (CW / r.width), y: (clientY - r.top) * (CH / r.height) }; }
   function inDash(cx, cy) { return Math.hypot(cx - DASH_BTN.x, cy - DASH_BTN.y) <= DASH_BTN.r; }
   function inMute(cx, cy) { return Math.hypot(cx - MUTE_BTN.x, cy - MUTE_BTN.y) <= MUTE_BTN.r + 8; }
+  // Host ends the round for everyone: all players land on the scores screen.
+  function quitGame() {
+    if (!authoritative) return;
+    if (phase !== Phase.PLAY && phase !== Phase.INTRO && phase !== Phase.CLEARED) return;
+    phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState();
+  }
+  function inQuit(cx, cy) { const b = QUIT_BTN; return authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
+  function pressQuit() { const now = performance.now(); if (quitArmedUntil > now) { quitArmedUntil = 0; quitGame(); } else quitArmedUntil = now + 3000; }
   function toggleMute() { muted = !muted; try { localStorage.setItem("livboj-muted", muted ? "1" : "0"); } catch {} if (!muted) unlockAudio(); }
   function curWorld() { return authoritative ? world : (lastView && lastView.world) || world; }
   function curPhase() { return authoritative ? phase : (lastView && lastView.phase); }
-  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); }, { passive: true });
+  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); }, { passive: true });
   canvas.addEventListener("touchstart", (e) => {
     usingTouch = true; e.preventDefault();
     for (const t of e.changedTouches) {
       const c = toCanvas(t.clientX, t.clientY);
       if (inMute(c.x, c.y)) { toggleMute(); continue; }
+      if (inQuit(c.x, c.y)) { pressQuit(); continue; }
       const ph = curPhase();
       if (ph === Phase.CLEARED || ph === Phase.OVER || ph === Phase.WIN || ph === Phase.LOBBY) { advance(); continue; }
       if (inDash(c.x, c.y)) dashTap = true; else pointerTarget = toWorld(c.x, c.y, curWorld().w, curWorld().h);
@@ -1094,7 +1187,7 @@ export function createGame(canvas, opts) {
   requestAnimationFrame(frame);
 
   return {
-    hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard,
+    hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame,
     _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,
