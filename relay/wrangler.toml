@@ -1,0 +1,13 @@
+name = "livboj-relay"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# One Durable Object per room code; it fans every message out to the other
+# players in the room over plain WebSockets on 443 (corporate-proxy friendly).
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
