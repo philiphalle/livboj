@@ -112,8 +112,11 @@ export class Board {
     if (request.method === "DELETE") {
       const key = this.env.ADMIN_KEY;
       if (!key || url.searchParams.get("key") !== key) return json({ error: "forbidden" }, 403);
-      await this.state.storage.put("entries", []);
-      return json({ entries: [] });
+      // ?id=<entry id> removes one entry (tests, cheaters); without id the whole list.
+      const id = url.searchParams.get("id");
+      const kept = id ? (await this.all()).filter((e) => e.id !== id) : [];
+      await this.state.storage.put("entries", kept);
+      return json({ entries: kept.slice(0, SHOW) });
     }
     return json({ error: "method" }, 405);
   }

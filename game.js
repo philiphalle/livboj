@@ -390,13 +390,13 @@ export function createGame(canvas, opts) {
     board = sortBoard(list.map(withEntryId)); boardSource = source; saveBoardLS(board); emitBoard();
     if (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) pushState(); // joiners see it too
   }
-  // Host: read the global list, and upload the pre-global local list once.
+  // Host: sync with the global list. The local cache is always posted (the
+  // relay dedupes by id, so this is idempotent) — that uploads a pre-global
+  // list the first time and re-fills the global list from any host's cache
+  // if it was ever wiped.
   async function initGlobalBoard() {
-    const local = board;
-    let uploaded = false; try { uploaded = localStorage.getItem("livboj-board-uploaded") === "1"; } catch {}
-    const merged = (!uploaded && local.length) ? await postGlobalBoard(local) : await fetchGlobalBoard();
+    const merged = board.length ? await postGlobalBoard(board) : await fetchGlobalBoard();
     if (!merged) return; // relay unreachable: keep showing the local cache
-    if (!uploaded) { try { localStorage.setItem("livboj-board-uploaded", "1"); } catch {} }
     adoptBoard(merged, "global");
   }
   function recordResult() {
@@ -1407,7 +1407,7 @@ export function createGame(canvas, opts) {
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),
-      saved: saved.length,
+      saved: saved.length, quitBtn: QUIT_BTN,
     }),
   };
 }
