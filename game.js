@@ -651,8 +651,9 @@ export function createGame(canvas, opts) {
     ctx.moveTo(bx + cabW * 0.42, baseY); ctx.lineTo(bx + cabW * 0.3, baseY - legH);
     ctx.moveTo(bx - cabW * 0.4, baseY - legH * 0.5); ctx.lineTo(bx + cabW * 0.4, baseY - legH * 0.5);
     ctx.stroke(); ctx.lineCap = "butt";
-    // cabin
+    // cabin (with a soft warm outline)
     ctx.fillStyle = "#cf934f"; ctx.fillRect(bx - cabW / 2, cy, cabW, cabH);
+    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.strokeRect(bx - cabW / 2, cy, cabW, cabH);
     ctx.fillStyle = "#0e3b52"; ctx.fillRect(bx - cabW * 0.32, cy + 5, cabW * 0.64, cabH * 0.4);
     ctx.fillStyle = "#a86a34"; ctx.fillRect(bx - cabW / 2, cy + cabH * 0.52, cabW, 3);
     // red-cross panel
@@ -660,6 +661,7 @@ export function createGame(canvas, opts) {
     ctx.fillStyle = "#fff"; ctx.fillRect(bx - 1.5, cy + cabH * 0.6 + 2, 3, 6); ctx.fillRect(bx - 5, cy + cabH * 0.6 + 3.5, 10, 3);
     // roof
     ctx.fillStyle = "#e5484d"; ctx.beginPath(); ctx.moveTo(bx - cabW * 0.62, cy); ctx.lineTo(bx, cy - 16); ctx.lineTo(bx + cabW * 0.62, cy); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
     // flag
     ctx.strokeStyle = "#7a4f2a"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(bx + cabW * 0.5, cy - 16); ctx.lineTo(bx + cabW * 0.5, cy - 42); ctx.stroke();
     ctx.fillStyle = "#ffb020"; const fl = Math.sin(waveT * 4) * 3;
@@ -672,18 +674,21 @@ export function createGame(canvas, opts) {
     const cols = ["#e5484d", "#f4f4f0"];
     for (let k = 0; k < 6; k++) { ctx.fillStyle = cols[k % 2]; ctx.beginPath(); ctx.moveTo(bx, topY); ctx.arc(bx, topY, R, Math.PI + k * Math.PI / 6, Math.PI + (k + 1) * Math.PI / 6); ctx.closePath(); ctx.fill(); }
     ctx.fillStyle = "#c93a3e"; for (let k = 0; k < 6; k++) { const a = Math.PI + (k + 0.5) * Math.PI / 6; ctx.beginPath(); ctx.arc(bx + Math.cos(a) * R, topY + Math.sin(a) * R, 3, 0, Math.PI * 2); ctx.fill(); }
+    // canopy outline
+    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath(); ctx.arc(bx, topY, R, Math.PI, Math.PI * 2); ctx.closePath(); ctx.stroke();
     ctx.fillStyle = "#7a4f2a"; ctx.beginPath(); ctx.arc(bx, topY - 2, 2.6, 0, Math.PI * 2); ctx.fill();
   }
   function drawBeachBall(bx, by) {
     ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.fill();
     const cols = ["#e5484d", "#3aa0ff", "#ffb020"];
     for (let k = 0; k < 3; k++) { ctx.fillStyle = cols[k]; ctx.beginPath(); ctx.moveTo(bx, by); ctx.arc(bx, by, 8, k * 2 * Math.PI / 3, (k * 2 / 3 + 0.24) * Math.PI); ctx.closePath(); ctx.fill(); }
-    ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.stroke();
   }
   function drawStarfish(bx, by) {
     ctx.save(); ctx.translate(bx, by); ctx.fillStyle = "#f2884b"; ctx.beginPath();
     for (let k = 0; k < 5; k++) { const a = -Math.PI / 2 + k * 2 * Math.PI / 5; ctx.lineTo(Math.cos(a) * 7, Math.sin(a) * 7); const a2 = a + Math.PI / 5; ctx.lineTo(Math.cos(a2) * 3, Math.sin(a2) * 3); }
     ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
     ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
@@ -781,8 +786,14 @@ export function createGame(canvas, opts) {
       ctx.strokeStyle = `rgba(205,232,246,${0.24 * (1 - rp)})`; ctx.lineWidth = 1.4;
       ctx.beginPath(); ctx.ellipse(0, 7, R * (1.0 + rp * 1.8), R * (0.5 + rp * 0.9), 0, 0, Math.PI * 2); ctx.stroke();
     }
-    // sink-time ring
-    ctx.strokeStyle = `hsl(${120 * frac},80%,55%)`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, R + 9, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke();
+    // sink-time gauge: faint track, soft glow, crisp arc, bright tip
+    const hue = 120 * frac, a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * frac, gr = R + 9;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = `hsla(${hue},85%,60%,0.22)`; ctx.lineWidth = 7; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
+    ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
+    ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = "butt";
 
     // --- submerged (refracted + water-tinted, depth fade) ---
     const refr = Math.sin(t * 2) * R * 0.06, kick = Math.sin(t * 2.2);
