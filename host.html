@@ -109,6 +109,7 @@
       <label>Spelare i lobbyn (upp till 12)</label>
       <ul class="roster" id="roster"></ul>
       <div class="muted">Spelare dyker upp här när de ansluter — det kan ta några sekunder.</div>
+      <div class="muted" id="net" style="margin-top:6px"></div>
     </div>
     <div class="field">
       <div class="boardhead">
@@ -146,6 +147,7 @@
     const u = new URL(location.href); u.searchParams.set("room", room); history.replaceState(null, "", u);
   }
   let joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
+  const relayParam = params.get("relay"); if (relayParam) joinUrl.searchParams.set("relay", relayParam); // joiners must use the same transport
 
   let api = null;
 
@@ -208,6 +210,9 @@
     });
   };
   document.getElementById("start").onclick = () => { if (api) api.hostStart(); };
+  // live network diagnostics in the lobby (signaling / STUN / TURN / relay)
+  const netEl = document.getElementById("net");
+  setInterval(() => { if (api && api.netSummary) { const s = api.netSummary(); netEl.textContent = s; netEl.style.color = /blockera|kan inte/.test(s) ? "#ff8a6a" : ""; } }, 1000);
 </script>
 </body>
 </html>
