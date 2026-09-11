@@ -264,6 +264,19 @@ export function createGame(canvas, opts) {
     ctx.font = "600 12px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(usingTouch ? "eller tryck var som helst" : "eller tryck Enter", cx, cy + h / 2 + 17);
   }
   function inAction(cx, cy) { const b = ACTION_BTN; return !!b && authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
+  // "Till startsidan" on the end screen, for everyone. Leaves the room and goes to the menu.
+  let LEAVE_BTN = null;
+  function drawLeaveButton(cx, cy) {
+    ctx.font = "700 15px system-ui, sans-serif";
+    const label = "Till startsidan";
+    const w = Math.ceil(ctx.measureText(label).width) + 36, h = 36, x = cx - w / 2, y = cy - h / 2;
+    LEAVE_BTN = { x, y, w, h };
+    ctx.fillStyle = "rgba(255,255,255,0.12)"; ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.22)"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = "#eaf6ff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label, cx, cy + 1); ctx.textBaseline = "alphabetic";
+  }
+  function inLeave(cx, cy) { const b = LEAVE_BTN; return !!b && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
+  function leaveToStart() { try { room && room.leave && room.leave(); } catch {} location.href = "index.html"; }
   let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
 
   // ---- Setup --------------------------------------------------------------
@@ -1332,8 +1345,8 @@ export function createGame(canvas, opts) {
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
     else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || "Lag"} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
-    if (authoritative) drawActionButton("Till lobbyn", CW / 2, y - 4);
-    else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
+    if (authoritative) { drawActionButton("Till lobbyn", CW / 2 - 100, y - 4); drawLeaveButton(CW / 2 + 110, y - 4); }
+    else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); drawLeaveButton(CW / 2, y + 34); }
   }
   function drawMute() {
     ctx.font = "16px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -1344,6 +1357,7 @@ export function createGame(canvas, opts) {
   let last = performance.now();
   function frame(now) {
     let dt = (now - last) / 1000; last = now; if (dt > 0.05) dt = 0.05; waveT += dt;
+    ACTION_BTN = null; LEAVE_BTN = null; // only the screens drawn this frame may be clickable
     fitBacking();
     if (authoritative) updateSim(dt); else updateJoin(dt);
     updateSaved(dt);
@@ -1379,13 +1393,14 @@ export function createGame(canvas, opts) {
   function toggleMute() { muted = !muted; try { localStorage.setItem("livboj-muted", muted ? "1" : "0"); } catch {} if (!muted) unlockAudio(); }
   function curWorld() { return authoritative ? world : (lastView && lastView.world) || world; }
   function curPhase() { return authoritative ? phase : (lastView && lastView.phase); }
-  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); else if (inAction(c.x, c.y)) advance(); }, { passive: true });
+  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); else if (inLeave(c.x, c.y)) leaveToStart(); else if (inAction(c.x, c.y)) advance(); }, { passive: true });
   canvas.addEventListener("touchstart", (e) => {
     usingTouch = true; e.preventDefault();
     for (const t of e.changedTouches) {
       const c = toCanvas(t.clientX, t.clientY);
       if (inMute(c.x, c.y)) { toggleMute(); continue; }
       if (inQuit(c.x, c.y)) { pressQuit(); continue; }
+      if (inLeave(c.x, c.y)) { leaveToStart(); continue; }
       const ph = curPhase();
       if (ph === Phase.CLEARED || ph === Phase.OVER || ph === Phase.WIN || ph === Phase.LOBBY) { advance(); continue; }
       if (inDash(c.x, c.y)) dashTap = true; else pointerTarget = toWorld(c.x, c.y, curWorld().w, curWorld().h);
@@ -1420,7 +1435,7 @@ export function createGame(canvas, opts) {
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),
-      saved: saved.length, quitBtn: QUIT_BTN, actionBtn: ACTION_BTN,
+      saved: saved.length, quitBtn: QUIT_BTN, actionBtn: ACTION_BTN, leaveBtn: LEAVE_BTN,
     }),
   };
 }
