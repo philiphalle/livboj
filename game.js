@@ -1168,7 +1168,7 @@ export function createGame(canvas, opts) {
     ctx.textAlign = "center";
     ctx.fillStyle = "#eaf6ff"; ctx.font = "800 26px system-ui, sans-serif"; ctx.fillText("Lobby", CW / 2, CH / 2 - 34);
     ctx.font = "500 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2";
-    ctx.fillText(authoritative ? "Tryck på blanksteg för att starta" : "Väntar på att värden startar…", CW / 2, CH / 2 - 8);
+    ctx.fillText(authoritative ? "Tryck på Enter för att starta" : "Väntar på att värden startar…", CW / 2, CH / 2 - 8);
     const names = (v.players || []).map((p) => (p.id === selfId ? myName + " (du)" : (p.name || "Spelare")));
     ctx.font = "700 16px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(`${names.length} spelare i lobbyn`, CW / 2, CH / 2 + 22);
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
@@ -1262,7 +1262,7 @@ export function createGame(canvas, opts) {
     y += 28;
     if (rows.length > 3) { ctx.font = "600 13px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(rows.slice(3, 12).map((r, i) => `${i + 4}. ${r.name} ${r.score} p`).join("   ·   "), CW / 2, y); }
     ctx.globalAlpha = 0.7 + 0.3 * Math.sin(t * 3);
-    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för att starta nästa nivå" : "Tryck på blanksteg för att starta nästa nivå", CW / 2, CH - 60); }
+    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för att starta nästa nivå" : "Tryck på Enter för att starta nästa nivå", CW / 2, CH - 60); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på att värden startar nästa nivå…", CW / 2, CH - 60); }
     ctx.globalAlpha = 1;
   }
@@ -1290,7 +1290,7 @@ export function createGame(canvas, opts) {
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
     else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  Lag ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
-    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på blanksteg för lobbyn", CW / 2, y); }
+    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på Enter för lobbyn", CW / 2, y); }
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
   }
   function drawMute() {
@@ -1318,7 +1318,7 @@ export function createGame(canvas, opts) {
     const k = e.key === " " ? "Space" : e.key; keys[k] = true;
     if (MOVE_KEYS.has(e.key) || MOVE_KEYS.has(k)) e.preventDefault();
     if (e.repeat) return;
-    if (k === "Space") advance();
+    if (k === "Enter") advance(); // Space is the dash key, so it must not also skip the level board
     if (k === "m" || k === "M") toggleMute();
   }, { passive: false });
   addEventListener("keyup", (e) => { const k = e.key === " " ? "Space" : e.key; keys[k] = false; });
