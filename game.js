@@ -252,6 +252,18 @@ export function createGame(canvas, opts) {
   const MUTE_BTN = { x: 28, y: CH - 28, r: 16 };
   const QUIT_BTN = { x: CW - 132, y: 44, w: 114, h: 24 }; // host-only "Avsluta spelet"
   let quitArmedUntil = 0; // two-tap confirm so nobody quits by accident
+  // The host's "go on" prompt is a real button (mouse/touch) as well as Enter.
+  let ACTION_BTN = null;
+  function drawActionButton(label, cx, cy) {
+    ctx.font = "800 20px system-ui, sans-serif";
+    const w = Math.ceil(ctx.measureText(label).width) + 48, h = 44, x = cx - w / 2, y = cy - h / 2;
+    ACTION_BTN = { x, y, w, h };
+    ctx.save(); ctx.shadowColor = "rgba(244,87,29,0.45)"; ctx.shadowBlur = 18; ctx.fillStyle = "#f4571d";
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 14); ctx.fill(); ctx.restore();
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label, cx, cy + 1); ctx.textBaseline = "alphabetic";
+    ctx.font = "600 12px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(usingTouch ? "eller tryck var som helst" : "eller tryck Enter", cx, cy + h / 2 + 17);
+  }
+  function inAction(cx, cy) { const b = ACTION_BTN; return !!b && authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
   let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
 
   // ---- Setup --------------------------------------------------------------
@@ -1197,7 +1209,8 @@ export function createGame(canvas, opts) {
     ctx.textAlign = "center";
     ctx.fillStyle = "#eaf6ff"; ctx.font = "800 26px system-ui, sans-serif"; ctx.fillText("Lobby", CW / 2, CH / 2 - 34);
     ctx.font = "500 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2";
-    ctx.fillText(authoritative ? "Tryck på Enter för att starta" : "Väntar på att värden startar…", CW / 2, CH / 2 - 8);
+    if (authoritative) drawActionButton("Starta spelet", CW / 2, CH / 2 - 8);
+    else ctx.fillText("Väntar på att värden startar…", CW / 2, CH / 2 - 8);
     const names = (v.players || []).map((p) => (p.id === selfId ? myName + " (du)" : (p.name || "Spelare")));
     ctx.font = "700 16px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(`${names.length} spelare i lobbyn`, CW / 2, CH / 2 + 22);
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
@@ -1291,7 +1304,7 @@ export function createGame(canvas, opts) {
     y += 28;
     if (rows.length > 3) { ctx.font = "600 13px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(rows.slice(3, 12).map((r, i) => `${i + 4}. ${r.name} ${r.score} p`).join("   ·   "), CW / 2, y); }
     ctx.globalAlpha = 0.7 + 0.3 * Math.sin(t * 3);
-    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för att starta nästa nivå" : "Tryck på Enter för att starta nästa nivå", CW / 2, CH - 60); }
+    if (authoritative) drawActionButton("Starta nästa nivå", CW / 2, CH - 64);
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på att värden startar nästa nivå…", CW / 2, CH - 60); }
     ctx.globalAlpha = 1;
   }
@@ -1319,7 +1332,7 @@ export function createGame(canvas, opts) {
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
     else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || "Lag"} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
     y += 18;
-    if (authoritative) { ctx.font = "800 20px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(usingTouch ? "Tryck för lobbyn" : "Tryck på Enter för lobbyn", CW / 2, y); }
+    if (authoritative) drawActionButton("Till lobbyn", CW / 2, y - 4);
     else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); }
   }
   function drawMute() {
@@ -1366,7 +1379,7 @@ export function createGame(canvas, opts) {
   function toggleMute() { muted = !muted; try { localStorage.setItem("livboj-muted", muted ? "1" : "0"); } catch {} if (!muted) unlockAudio(); }
   function curWorld() { return authoritative ? world : (lastView && lastView.world) || world; }
   function curPhase() { return authoritative ? phase : (lastView && lastView.phase); }
-  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); }, { passive: true });
+  canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); else if (inAction(c.x, c.y)) advance(); }, { passive: true });
   canvas.addEventListener("touchstart", (e) => {
     usingTouch = true; e.preventDefault();
     for (const t of e.changedTouches) {
@@ -1407,7 +1420,7 @@ export function createGame(canvas, opts) {
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),
-      saved: saved.length, quitBtn: QUIT_BTN,
+      saved: saved.length, quitBtn: QUIT_BTN, actionBtn: ACTION_BTN,
     }),
   };
 }
