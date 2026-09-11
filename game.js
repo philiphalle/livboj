@@ -5,6 +5,8 @@ import { joinRoom, selfId } from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/n
 
 const APP_ID = "livboj-bookbeat-9f3a";
 const MAX_PLAYERS = 12;
+const SHORE_H = 70; // beach band along the bottom; rescued swimmers gather here
+const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
 
 // STUN + a public best-effort TURN relay so most NATs can connect without setup.
 const RTC = {
@@ -131,6 +133,7 @@ export function createGame(canvas, opts) {
   let board = loadBoard(); // host's own persisted leaderboard
   let netBoard = []; // leaderboard received from the host (joiners)
   let monsters = [], monsterSeq = 1;
+  let saved = []; // rescued swimmers swimming to / cheering on the shore (cosmetic)
 
   const keys = Object.create(null);
   let usingTouch = false, pointerTarget = null, dashTap = false;
@@ -213,6 +216,26 @@ export function createGame(canvas, opts) {
     saveBoardLS(board); emitBoard();
   }
   function clearBoard() { board = []; saveBoardLS(board); emitBoard(); }
+
+  // A rescued swimmer heads for the beach and cheers once it arrives. Purely
+  // cosmetic and spawned locally on every client (from the rescue event), so
+  // it needs no network sync.
+  function spawnSaved(x, y, sk, hr, id) {
+    const W = authoritative ? world : (lastView && lastView.world) || world;
+    const top = shoreY(W);
+    saved.push({ x, y, tx: 40 + Math.random() * (W.w - 80), ty: top + 12 + Math.random() * (SHORE_H - 26), sk: sk || 0, hr: hr || 0, sid: id || ((Math.random() * 999) | 0), state: "swim", ph: Math.random() * 6, cheer: 0 });
+    if (saved.length > 30) saved.shift();
+  }
+  function updateSaved(dt) {
+    for (const sv of saved) {
+      sv.ph += dt * 5;
+      if (sv.state === "swim") {
+        const dx = sv.tx - sv.x, dy = sv.ty - sv.y, d = Math.hypot(dx, dy);
+        if (d < 4) { sv.x = sv.tx; sv.y = sv.ty; sv.state = "cheer"; }
+        else { sv.x += (dx / d) * 155 * dt; sv.y += (dy / d) * 155 * dt; }
+      } else sv.cheer += dt;
+    }
+  }
   function emitRoster() { cbs.onRoster && cbs.onRoster(rosterList()); }
   function emitPhase() { cbs.onPhase && cbs.onPhase(phase); }
 
@@ -222,7 +245,7 @@ export function createGame(canvas, opts) {
     world = worldSize(n);
     obstacles = makeObstacles(idx, world.w, world.h);
     const L = levelParams(idx, n);
-    levelIndex = idx; caught = 0; missed = 0; timeLeft = L.time; spawnTimer = 0.4; swimmers = []; splashes = [];
+    levelIndex = idx; caught = 0; missed = 0; timeLeft = L.time; spawnTimer = 0.4; swimmers = []; splashes = []; saved = [];
     // Spread players in a small ring around centre so rings/labels don't stack.
     const arr = [...players.values()], ring = arr.length > 1 ? 80 : 0;
     arr.forEach((p, i) => { const a = (i / arr.length) * Math.PI * 2; p.x = world.w / 2 + Math.cos(a) * ring; p.y = world.h / 2 + Math.sin(a) * ring; p.dashActive = 0; p.dashCooldown = 0; });
@@ -270,7 +293,7 @@ export function createGame(canvas, opts) {
     const L = levelParams(levelIndex, n);
     const margin = 60;
     let x, y, tries = 0;
-    do { x = margin + Math.random() * (world.w - margin * 2); y = margin + Math.random() * (world.h - margin * 2); tries++; }
+    do { x = margin + Math.random() * (world.w - margin * 2); y = margin + Math.random() * (shoreY(world) - margin * 2); tries++; }
     while (tries < 20 && obstacles.some((o) => circleHitsRect(x, y, 26, o)));
     const ang = Math.random() * Math.PI * 2;
     swimmers.push({ id: swimmerSeq++, x, y, r: 16, vx: Math.cos(ang) * L.speed, vy: Math.sin(ang) * L.speed, life: L.sink, maxLife: L.sink, bob: Math.random() * Math.PI * 2, sk: (Math.random() * SKINS.length) | 0, hr: (Math.random() * HAIRS.length) | 0 });
@@ -299,7 +322,7 @@ export function createGame(canvas, opts) {
     p.x += input.dx * speed * dt; p.y += input.dy * speed * dt;
     for (const o of obstacles) { const hit = circleHitsRect(p.x, p.y, p.r, o); if (hit) { p.x = hit.x; p.y = hit.y; } }
     p.x = Math.max(p.r, Math.min(world.w - p.r, p.x));
-    p.y = Math.max(p.r, Math.min(world.h - p.r, p.y));
+    p.y = Math.max(p.r, Math.min(shoreY(world) - p.r, p.y));
   }
 
   function updateMonsters(dt) {
@@ -311,7 +334,7 @@ export function createGame(canvas, opts) {
       else if (Math.hypot(m.vx, m.vy) < 12) { const a = Math.random() * Math.PI * 2; m.vx = Math.cos(a) * mspeed; m.vy = Math.sin(a) * mspeed; }
       m.x += m.vx * dt; m.y += m.vy * dt; m.wob = (m.wob || 0) + dt * 3;
       if (m.x < m.r || m.x > world.w - m.r) { m.vx *= -1; m.x = Math.max(m.r, Math.min(world.w - m.r, m.x)); }
-      if (m.y < m.r || m.y > world.h - m.r) { m.vy *= -1; m.y = Math.max(m.r, Math.min(world.h - m.r, m.y)); }
+      if (m.y < m.r || m.y > shoreY(world) - m.r) { m.vy *= -1; m.y = Math.max(m.r, Math.min(shoreY(world) - m.r, m.y)); }
       m.dir = Math.atan2(m.vy, m.vx);
     }
   }
@@ -347,7 +370,7 @@ export function createGame(canvas, opts) {
       const s = swimmers[i];
       s.x += s.vx * dt; s.y += s.vy * dt; s.bob += dt * 4;
       if (s.x < s.r || s.x > world.w - s.r) { s.vx *= -1; s.x = Math.max(s.r, Math.min(world.w - s.r, s.x)); }
-      if (s.y < s.r || s.y > world.h - s.r) { s.vy *= -1; s.y = Math.max(s.r, Math.min(world.h - s.r, s.y)); }
+      if (s.y < s.r || s.y > shoreY(world) - s.r) { s.vy *= -1; s.y = Math.max(s.r, Math.min(shoreY(world) - s.r, s.y)); }
       for (const o of obstacles) { const hit = circleHitsRect(s.x, s.y, s.r, o); if (hit) { s.x = hit.x; s.y = hit.y; const dot = s.vx * hit.nx + s.vy * hit.ny; s.vx -= 2 * dot * hit.nx; s.vy -= 2 * dot * hit.ny; } }
       s.life -= dt;
 
@@ -355,7 +378,7 @@ export function createGame(canvas, opts) {
       for (const p of players.values()) { if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + s.r) { rescuer = p; break; } }
       if (rescuer) {
         caught++; score += 10 + levelIndex * 5; rescuer.rescues = (rescuer.rescues || 0) + 1;
-        splashes.push({ x: s.x, y: s.y, t: 0, good: true }); fxOut.push([Math.round(s.x), Math.round(s.y), 1]); sRescue();
+        splashes.push({ x: s.x, y: s.y, t: 0, good: true }); fxOut.push([Math.round(s.x), Math.round(s.y), 1, s.sk, s.hr, s.id]); sRescue(); spawnSaved(s.x, s.y, s.sk, s.hr, s.id);
         swimmers.splice(i, 1);
         if (caught >= L.quota) { phase = Phase.CLEARED; sClear(); emitPhase(); pushState(); return; }
         continue;
@@ -394,7 +417,7 @@ export function createGame(canvas, opts) {
     for (const o of (lastView.obstacles || [])) { const hit = circleHitsRect(selfPos.x, selfPos.y, selfPos.r, o); if (hit) { selfPos.x = hit.x; selfPos.y = hit.y; } }
     const w = lastView.world;
     selfPos.x = Math.max(selfPos.r, Math.min(w.w - selfPos.r, selfPos.x));
-    selfPos.y = Math.max(selfPos.r, Math.min(w.h - selfPos.r, selfPos.y));
+    selfPos.y = Math.max(selfPos.r, Math.min(shoreY(w) - selfPos.r, selfPos.y));
     dashTap = false;
   }
 
@@ -454,10 +477,10 @@ export function createGame(canvas, opts) {
       iPlayer.set(p[0], cur);
     }
     for (const id of [...iPlayer.keys()]) if (!seenP.has(id)) iPlayer.delete(id);
-    for (const e of d.fx || []) { jSplashes.push({ x: e[0], y: e[1], t: 0, good: e[2] === 1 }); (e[2] === 1 ? sRescue : e[2] === 2 ? sChomp : sMiss)(); }
+    for (const e of d.fx || []) { jSplashes.push({ x: e[0], y: e[1], t: 0, good: e[2] === 1 }); if (e[2] === 1) { sRescue(); spawnSaved(e[0], e[1], e[3], e[4], e[5]); } else (e[2] === 2 ? sChomp : sMiss)(); }
     if (!selfPos.seeded && d.phase === Phase.PLAY) { const meP = (d.players || []).find((p) => p[0] === selfId); if (meP) { selfPos.x = meP[1]; selfPos.y = meP[2]; selfPos.seeded = true; selfPos.stun = 0; selfPos.stunCd = 0; } }
     if (d.phase === Phase.LOBBY || d.phase === Phase.INTRO) selfPos.seeded = false;
-    if (prevPhase !== d.phase) { if (d.phase === Phase.PLAY) { jLastSec = Math.ceil(d.timeLeft); sStart(); } else if (d.phase === Phase.CLEARED) sClear(); else if (d.phase === Phase.OVER) sOver(); else if (d.phase === Phase.WIN) sWin(); cbs.onPhase && cbs.onPhase(d.phase); }
+    if (prevPhase !== d.phase) { if (d.phase === Phase.INTRO || d.phase === Phase.LOBBY) saved = []; if (d.phase === Phase.PLAY) { jLastSec = Math.ceil(d.timeLeft); sStart(); } else if (d.phase === Phase.CLEARED) sClear(); else if (d.phase === Phase.OVER) sOver(); else if (d.phase === Phase.WIN) sWin(); cbs.onPhase && cbs.onPhase(d.phase); }
     cbs.onRoster && cbs.onRoster((d.players || []).map((p) => ({ id: p[0], name: p[0] === selfId ? myName : p[3], you: p[0] === selfId })));
   }
 
@@ -550,6 +573,42 @@ export function createGame(canvas, opts) {
     const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
     vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.28)");
     ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
+  }
+  function drawShore(w, h) {
+    const y0 = shoreY({ w, h });
+    const g = ctx.createLinearGradient(0, y0, 0, h);
+    g.addColorStop(0, "#cdb583"); g.addColorStop(0.16, "#e7d4a4"); g.addColorStop(1, "#d6bd85");
+    ctx.fillStyle = g; ctx.fillRect(0, y0, w, SHORE_H);
+    // foam line where water meets sand
+    ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.beginPath();
+    for (let x = 0; x <= w; x += 14) { const yy = y0 + Math.sin(x * 0.05 + waveT * 1.6) * 3; x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
+    ctx.lineTo(w, y0 - 5); ctx.lineTo(0, y0 - 5); ctx.closePath(); ctx.fill();
+    // sand speckles
+    ctx.fillStyle = "rgba(120,95,55,0.22)";
+    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 10 + ((i * 53) % (SHORE_H - 12)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
+  }
+  function drawSaved(sv) {
+    const skin = SKINS[sv.sk % SKINS.length], hair = HAIRS[sv.hr % HAIRS.length], suit = SUITS[sv.sid % SUITS.length];
+    if (sv.state === "swim") {
+      const cy = sv.y + Math.sin(sv.ph) * 1.5;
+      ctx.strokeStyle = "rgba(190,225,240,0.35)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(sv.x, cy + 5, 12, 5, 0, 0, Math.PI * 2); ctx.stroke();
+      const wv = Math.sin(sv.ph * 1.4) * 3;
+      ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(sv.x - 5, cy); ctx.lineTo(sv.x - 10, cy - 5 + wv); ctx.moveTo(sv.x + 5, cy); ctx.lineTo(sv.x + 10, cy - 5 - wv); ctx.stroke(); ctx.lineCap = "butt";
+      ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(sv.x, cy, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(sv.x, cy - 1, 8, Math.PI, Math.PI * 2); ctx.fill();
+    } else {
+      const jump = Math.abs(Math.sin(sv.cheer * 6)) * 6, bx = sv.x, by = sv.y - jump;
+      ctx.fillStyle = "rgba(0,0,0,0.15)"; ctx.beginPath(); ctx.ellipse(sv.x, sv.y + 11, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = suit; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 5, by - 1, 10, 12, 3) : ctx.rect(bx - 5, by - 1, 10, 12); ctx.fill();
+      ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(bx - 3, by + 11); ctx.lineTo(bx - 3, by + 18); ctx.moveTo(bx + 3, by + 11); ctx.lineTo(bx + 3, by + 18); ctx.stroke();
+      const raise = 2 + Math.sin(sv.cheer * 6) * 2;
+      ctx.beginPath(); ctx.moveTo(bx - 4, by + 1); ctx.lineTo(bx - 10, by - 8 - raise); ctx.moveTo(bx + 4, by + 1); ctx.lineTo(bx + 10, by - 8 - raise); ctx.stroke(); ctx.lineCap = "butt";
+      ctx.fillStyle = skin; ctx.beginPath(); ctx.arc(bx, by - 8, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(bx, by - 9, 6, Math.PI, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#3a2a1c"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(bx, by - 7, 2.4, 0.12 * Math.PI, 0.88 * Math.PI); ctx.stroke();
+    }
   }
   function drawBrygga(o) {
     ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(o.x + 4, o.y + 7, o.w, o.h);
@@ -701,9 +760,11 @@ export function createGame(canvas, opts) {
     const f = fit(v.world.w, v.world.h);
     ctx.setTransform(f.s, 0, 0, f.s, f.ox, f.oy);
     drawWater(v.world.w, v.world.h, waveT);
+    drawShore(v.world.w, v.world.h);
     for (const o of v.obstacles) drawBrygga(o);
     for (const s of v.swimmers) drawSwimmer(s);
     for (const m of v.monsters || []) drawMonster(m);
+    for (const sv of saved) drawSaved(sv);
     if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -790,6 +851,7 @@ export function createGame(canvas, opts) {
   function frame(now) {
     let dt = (now - last) / 1000; last = now; if (dt > 0.05) dt = 0.05; waveT += dt;
     if (authoritative) updateSim(dt); else updateJoin(dt);
+    updateSaved(dt);
     if (!authoritative && lastView) {
       if (lastView.phase === Phase.PLAY) { const sec = Math.ceil(lastView.timeLeft); if (sec !== jLastSec) { if (sec <= 3 && sec > 0) sTick(); jLastSec = sec; } }
       const t = performance.now(); if (t - lastStateTime > 3000) { if (!electing) electHost(); else if (t - electAt > 4000) electing = false; }
