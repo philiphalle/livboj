@@ -909,6 +909,9 @@ export function createGame(canvas, opts) {
       level: authoritative ? levelIndex : (lastView ? lastView.levelIndex : 0),
       monsters: authoritative ? monsters.length : iMonster.size,
       rescues: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
+      sw: authoritative ? swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
+      self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
+      saved: saved.length,
     }),
   };
 }
