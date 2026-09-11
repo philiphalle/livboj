@@ -212,7 +212,13 @@
   document.getElementById("start").onclick = () => { if (api) api.hostStart(); };
   // live network diagnostics in the lobby (signaling / STUN / TURN / relay)
   const netEl = document.getElementById("net");
-  setInterval(() => { if (api && api.netSummary) { const s = api.netSummary(); netEl.textContent = s; netEl.style.color = /blockera|kan inte/.test(s) ? "#ff8a6a" : ""; } }, 1000);
+  setInterval(() => {
+    if (!api || !api.netSummary) return;
+    const s = api.netSummary(); netEl.textContent = s; netEl.style.color = /blockera|kan inte/.test(s) ? "#ff8a6a" : "";
+    // stamp the resolved signaling strategy on the invite link so joiners use the same one
+    const sig = api.signaling && api.signaling();
+    if (sig && joinUrl.searchParams.get("sig") !== sig) { joinUrl.searchParams.set("sig", sig); shareLine.textContent = joinUrl.href; }
+  }, 1000);
 </script>
 </body>
 </html>
