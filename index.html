@@ -158,12 +158,13 @@
   const fmtDate = (ts) => { const d = new Date(ts); return `${d.getDate()}/${d.getMonth() + 1}`; };
   const fmtDur = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   const teamOf = (e) => e.team || (e.n === 1 ? "Solo" : "Lag");
-  const names = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+  // Rows from before individual crediting worked have a total but all-zero players: names only, no "0p".
+  const names = (e) => { const ps = e.players || []; const noSplit = ps.every((pp) => typeof pp === "string" || !pp.score); return ps.map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", "); };
   const byTs = (a, b) => b.ts - a.ts;
   function rowsFor(key, list) {
     const P = () => list.flatMap((e) => (e.players || []).filter((p) => typeof p !== "string").map((p) => ({ ...p, e })));
     switch (key) {
-      case "spelare": return P().sort((a, b) => b.score - a.score || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.score} p` }));
+      case "spelare": return P().filter((p) => p.score > 0).sort((a, b) => b.score - a.score || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.score} p` }));
       case "raddade": return P().filter((p) => p.rescues > 0).sort((a, b) => b.rescues - a.rescues || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.rescues} räddade` }));
       case "kombo": return list.filter((e) => e.combo > 0).sort((a, b) => b.combo - a.combo || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · ${fmtDate(e.ts)}`], sc: `${e.combo} i rad` }));
       case "speltid": return list.filter((e) => e.duration > 0).sort((a, b) => b.duration - a.duration || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: fmtDur(e.duration) }));

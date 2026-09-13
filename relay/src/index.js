@@ -84,6 +84,7 @@ function sanitize(e) {
   if (!e || typeof e !== "object") return null;
   const score = int(e.score, 0, 1_000_000), level = int(e.level, 1, 20), ts = int(e.ts, 0, 4_102_444_800_000);
   if (score === null || level === null || ts === null) return null;
+  if (score === 0) return null; // a game with nothing rescued is not a result
   const players = Array.isArray(e.players)
     ? e.players.slice(0, 12).map((p) => (typeof p === "string" ? { name: str(p, 14), score: 0, rescues: 0 } : { name: str(p && p.name, 14) || "Spelare", score: int(p && p.score, 0, 1_000_000) || 0, rescues: int(p && p.rescues, 0, 100_000) || 0 }))
     : [];

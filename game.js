@@ -431,6 +431,7 @@ export function createGame(canvas, opts) {
     adoptBoard(merged, "global");
   }
   function recordResult() {
+    if (score <= 0) return; // nothing rescued: not a result worth listing
     const entry = withEntryId({
       score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(), team: myTeam,
       duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: totalCaught, combo: bestCombo,
@@ -1351,7 +1352,8 @@ export function createGame(canvas, opts) {
     ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText("🏆 Topplista", CW / 2, y); y += 26;
     const soloGame = (v.players || []).length <= 1;
     const b = (v.board || []).filter((e) => (e.n === 1) === soloGame); // solo runs compare with solo runs, teams with teams
-    const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+    // Entries from before individual crediting worked have a total but all-zero players: show names only.
+    const fmt = (e) => { const ps = e.players || []; const noSplit = ps.every((pp) => typeof pp === "string" || !pp.score); return ps.map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", "); };
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
     else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || (e.n === 1 ? "Solo" : "Lag")} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });

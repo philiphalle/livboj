@@ -155,7 +155,7 @@
   const params = new URLSearchParams(location.search);
   let room = (params.get("room") || "").toUpperCase();
   if (!/^[A-Z0-9]{3,6}$/.test(room)) {
-    room = Array.from({ length: 4 }, () => ALPHABET[(Math.random() * ALPHABET.length) | 0]).join("");
+    room = Array.from({ length: 3 }, () => ALPHABET[(Math.random() * ALPHABET.length) | 0]).join(""); // 3 chars: ~30k codes, plenty for an office
     const u = new URL(location.href); u.searchParams.set("room", room); history.replaceState(null, "", u);
   }
   let joinUrl = new URL("index.html", location.href); joinUrl.searchParams.set("room", room);
@@ -183,7 +183,8 @@
       const li = document.createElement("li");
       const left = document.createElement("span");
       const d = new Date(e.ts); const ds = `${d.getDate()}/${d.getMonth() + 1}`;
-      const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
+      const noSplit = (e.players || []).every((pp) => typeof pp === "string" || !pp.score); // old rows: total only
+      const names = (e.players || []).map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", ");
       left.textContent = `${i + 1}. ${e.team || (e.n === 1 ? "Solo" : "Lag")} — ${names} · Nivå ${e.level} · ${ds}`;
       const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = `${e.score} p`;
       li.append(left, sc); boardEl.appendChild(li);
