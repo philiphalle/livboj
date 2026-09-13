@@ -667,7 +667,8 @@ export function createGame(canvas, opts) {
       monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
       players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
       fx: fxOut,
-      board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board.slice(0, BOARD_SHOW) : undefined,
+      // joiners only ever see team games, so send the top team entries (not solo runs)
+      board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board.filter((e) => e.n >= 2).slice(0, BOARD_SHOW) : undefined,
     };
     fxOut = [];
     try { sendState(snap); } catch {}
@@ -1348,7 +1349,8 @@ export function createGame(canvas, opts) {
     ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(sub, CW / 2, y); y += 34;
     y = drawStandings(v, y, 8) + 12;
     ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText("🏆 Topplista", CW / 2, y); y += 26;
-    const b = v.board || [];
+    const soloGame = (v.players || []).length <= 1;
+    const b = (v.board || []).filter((e) => (e.n === 1) === soloGame); // solo runs compare with solo runs, teams with teams
     const fmt = (e) => (e.players || []).map((pp) => typeof pp === "string" ? pp : `${pp.name} ${pp.score}p`).join(", ");
     ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
     if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }

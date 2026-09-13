@@ -151,7 +151,7 @@
   // Global leaderboard, refreshed while the menu is open. One shared list of
   // finished games (solo and hosted); the tabs are different views of it.
   const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc"), tabsEl = document.getElementById("boardTabs");
-  const TABS = [["lag", "Lag"], ["spelare", "Spelare"], ["raddade", "Räddade"], ["kombo", "Kombo"], ["speltid", "Speltid"]];
+  const TABS = [["lag", "Lag"], ["solo", "Solo"], ["spelare", "Spelare"], ["raddade", "Räddade"], ["kombo", "Kombo"], ["speltid", "Speltid"]];
   let tab = "lag"; try { tab = localStorage.getItem("livboj-board-tab") || "lag"; } catch {}
   if (!TABS.some(([k]) => k === tab)) tab = "lag";
   let entries = null;
@@ -167,7 +167,9 @@
       case "raddade": return P().filter((p) => p.rescues > 0).sort((a, b) => b.rescues - a.rescues || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.rescues} räddade` }));
       case "kombo": return list.filter((e) => e.combo > 0).sort((a, b) => b.combo - a.combo || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · ${fmtDate(e.ts)}`], sc: `${e.combo} i rad` }));
       case "speltid": return list.filter((e) => e.duration > 0).sort((a, b) => b.duration - a.duration || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: fmtDur(e.duration) }));
-      default: return list.slice().sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
+      // Lag = games with 2+ players; Solo = one-player games (a solo total is that player's score).
+      case "solo": return list.filter((e) => e.n === 1).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [(e.players[0] && e.players[0].name) || "Spelare", ` · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
+      default: return list.filter((e) => e.n >= 2).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
     }
   }
   function renderTabs() {
@@ -183,7 +185,7 @@
     if (!entries) return;
     boardEl.innerHTML = "";
     const rows = rowsFor(tab, entries);
-    if (!rows.length) { boardEl.innerHTML = `<li class="empty">${entries.length ? "Inga resultat i den här listan än" : "Inga resultat än — bli först!"}</li>`; return; }
+    if (!rows.length) { boardEl.innerHTML = `<li class="empty">${entries.length ? (tab === "lag" ? "Inga lagspel än — skapa ett eget spel!" : "Inga resultat i den här listan än") : "Inga resultat än — bli först!"}</li>`; return; }
     rows.forEach((r, i) => {
       const li = document.createElement("li"); if (i === 0) li.className = "top1";
       const who = document.createElement("span"); who.className = "who";

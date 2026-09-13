@@ -177,7 +177,8 @@
   function renderBoard(list, source) {
     boardSourceEl.textContent = source === "global" ? "global · alla spel" : "lokal kopia · reläservern nås inte";
     boardEl.innerHTML = "";
-    if (!list || !list.length) { boardEl.innerHTML = '<li class="empty">Inga resultat än</li>'; return; }
+    list = (list || []).filter((e) => e.n >= 2); // the lobby is about a team game: teams only
+    if (!list.length) { boardEl.innerHTML = '<li class="empty">Inga lagspel än</li>'; return; }
     list.slice(0, 10).forEach((e, i) => {
       const li = document.createElement("li");
       const left = document.createElement("span");
