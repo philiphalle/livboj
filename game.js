@@ -596,6 +596,18 @@ export function createGame(canvas, opts) {
       if (best) { const ang = Math.atan2(best.y - m.y, best.x - m.x); const k = Math.min(1, dt * 1.8); m.vx += (Math.cos(ang) * mspeed - m.vx) * k; m.vy += (Math.sin(ang) * mspeed - m.vy) * k; }
       else if (Math.hypot(m.vx, m.vy) < 12) { const a = Math.random() * Math.PI * 2; m.vx = Math.cos(a) * mspeed; m.vy = Math.sin(a) * mspeed; }
       m.x += m.vx * dt; m.y += m.vy * dt; m.wob = (m.wob || 0) + dt * 3;
+      // docks are solid for monsters too: push out and slide along the dock (no bounce, so a hunt flows around it)
+      for (const o of obstacles) {
+        const hit = circleHitsRect(m.x, m.y, m.r * 0.75, o);
+        if (!hit) continue;
+        m.x = hit.x; m.y = hit.y;
+        const dot = m.vx * hit.nx + m.vy * hit.ny;
+        if (dot < 0) { m.vx -= dot * hit.nx; m.vy -= dot * hit.ny; }
+        if (Math.hypot(m.vx, m.vy) < mspeed * 0.5) { // pinned head-on: pick a way along the dock
+          const tx = -hit.ny, ty = hit.nx, sgn = (best ? Math.sign((best.x - m.x) * tx + (best.y - m.y) * ty) : (Math.random() < 0.5 ? -1 : 1)) || 1;
+          m.vx = tx * sgn * mspeed; m.vy = ty * sgn * mspeed;
+        }
+      }
       if (m.x < m.r || m.x > world.w - m.r) { m.vx *= -1; m.x = Math.max(m.r, Math.min(world.w - m.r, m.x)); }
       if (m.y < m.r || m.y > shoreY(world) - m.r) { m.vy *= -1; m.y = Math.max(m.r, Math.min(shoreY(world) - m.r, m.y)); }
       m.dir = Math.atan2(m.vy, m.vx);
@@ -1052,26 +1064,9 @@ export function createGame(canvas, opts) {
     ctx.translate(0, bob); ctx.scale(1, tilt);
     if (stunned) ctx.globalAlpha = 0.6 + 0.25 * Math.sin(waveT * 20);
     // player colour: a soft glowing ring outside the rope
-    if (hue != null) { ctx.save(); ctx.shadowColor = `hsla(${hue},90%,65%,0.9)`; ctx.shadowBlur = 14; ctx.strokeStyle = `hsla(${hue},85%,62%,0.85)`; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, r * 1.36, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+    if (hue != null) { ctx.save(); ctx.shadowColor = `hsla(${hue},90%,65%,0.9)`; ctx.shadowBlur = 14; ctx.strokeStyle = `hsla(${hue},85%,62%,0.85)`; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, r + 8, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
     const donut = () => { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); };
-    // grab rope: threaded through four grommets, sagging outward between them like the real thing
-    if (!lowFx) {
-      const ropePath = (dy) => {
-        ctx.beginPath();
-        for (let i = 0; i < 4; i++) {
-          const a0 = i * Math.PI / 2, a1 = a0 + Math.PI / 2, am = a0 + Math.PI / 4;
-          const x0 = Math.cos(a0) * r * 0.97, y0 = Math.sin(a0) * r * 0.97 + dy, x1 = Math.cos(a1) * r * 0.97, y1 = Math.sin(a1) * r * 0.97 + dy;
-          const cx = Math.cos(am) * r * 1.75, cy = Math.sin(am) * r * 1.75 + dy; // curve midpoint lands at ~1.22r
-          if (i === 0) ctx.moveTo(x0, y0);
-          ctx.quadraticCurveTo(cx, cy, x1, y1);
-        }
-      };
-      ctx.save(); ctx.lineCap = "round"; ctx.lineJoin = "round";
-      ctx.strokeStyle = "rgba(60,45,25,0.5)"; ctx.lineWidth = 3.4; ropePath(1.3); ctx.stroke();  // shadow / thickness
-      ctx.strokeStyle = "#e9dcb9"; ctx.lineWidth = 2.6; ropePath(0); ctx.stroke();             // rope
-      ctx.setLineDash([2.2, 2.6]); ctx.strokeStyle = "rgba(110,85,45,0.45)"; ctx.lineWidth = 2.6; ropePath(0); ctx.stroke(); // twist
-      ctx.restore();
-    }
+    // Today's Trygg-Hansa look: a clean orange torus with four white bands, no rope.
     if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 22; }
     // body: orange tube with four warm-white bands
     donut(); ctx.fillStyle = "#ef5a1f"; ctx.fill("evenodd"); ctx.shadowBlur = 0;
@@ -1086,14 +1081,6 @@ export function createGame(canvas, opts) {
     const dir = ctx.createLinearGradient(-r, -r, r, r);
     dir.addColorStop(0, "rgba(255,255,255,0.16)"); dir.addColorStop(0.5, "rgba(255,255,255,0)"); dir.addColorStop(1, "rgba(0,0,0,0.28)");
     donut(); ctx.fillStyle = dir; ctx.fill("evenodd");
-    // grommets where the rope meets the tube
-    if (!lowFx) {
-      for (let i = 0; i < 4; i++) {
-        const a = i * Math.PI / 2, px = Math.cos(a) * r * 0.93, py = Math.sin(a) * r * 0.93;
-        ctx.fillStyle = "#e6d9b8"; ctx.beginPath(); ctx.ellipse(px, py, r * 0.09, r * 0.16, a, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = "rgba(70,55,30,0.5)"; ctx.beginPath(); ctx.ellipse(px, py, r * 0.045, r * 0.1, a, 0, Math.PI * 2); ctx.fill();
-      }
-    }
     // edges, specular hot spot on the crest, cool water reflection on the far rim
     ctx.strokeStyle = "rgba(40,15,0,0.45)"; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
     ctx.strokeStyle = "rgba(40,15,0,0.55)"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
@@ -1542,6 +1529,7 @@ export function createGame(canvas, opts) {
       players: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
       mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
+      obstacles: (authoritative ? obstacles : (lastView && lastView.obstacles) || []).map((o) => [Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h)]),
       missed: authoritative ? missed : (lastView ? lastView.missed : 0),
       saved: saved.length, quitBtn: QUIT_BTN, actionBtn: ACTION_BTN, leaveBtn: LEAVE_BTN,
     }),
