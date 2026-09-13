@@ -205,6 +205,38 @@ async function postGlobalBoard(entries) {
   try { const r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries }) }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
 }
 
+// ---- Water texture ---------------------------------------------------------
+// A seamless value-noise tile of soft light filaments, scrolled in two layers
+// to fake sunlight refracted through the surface (the classic caustics trick).
+let CAUSTIC = null;
+function causticTile() {
+  if (CAUSTIC) return CAUSTIC;
+  const S = 256, P = 8; // pixels, base lattice period (divides S -> seamless)
+  let seed = 1234567;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const lat = [];
+  for (let k = 0; k < 3; k++) { const per = P << k; const g = new Float32Array(per * per); for (let i = 0; i < g.length; i++) g[i] = rnd(); lat.push({ per, g }); }
+  const smooth = (t) => t * t * (3 - 2 * t);
+  const sample = (L, u, v) => {
+    const x0 = Math.floor(u), y0 = Math.floor(v), fx = smooth(u - x0), fy = smooth(v - y0), per = L.per;
+    const at = (x, y) => L.g[((y % per + per) % per) * per + ((x % per + per) % per)];
+    const a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
+    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+  };
+  const cv = document.createElement("canvas"); cv.width = cv.height = S;
+  const c2 = cv.getContext("2d"); const img = c2.createImageData(S, S); const px = img.data;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let n = 0, amp = 0.55, tot = 0;
+    for (let k = 0; k < 3; k++) { const L = lat[k]; n += sample(L, x / S * L.per, y / S * L.per) * amp; tot += amp; amp *= 0.5; }
+    n /= tot;
+    const ridge = 1 - Math.min(1, Math.abs(n - 0.5) * 5); // bright where the field crosses its middle -> a filament network
+    const a = Math.pow(ridge, 3);
+    const i = (y * S + x) * 4; px[i] = 225; px[i + 1] = 245; px[i + 2] = 255; px[i + 3] = Math.round(a * 255);
+  }
+  c2.putImageData(img, 0, 0);
+  CAUSTIC = cv; return cv;
+}
+
 // ==========================================================================
 export function createGame(canvas, opts) {
   const ctx = canvas.getContext("2d");
@@ -777,65 +809,69 @@ export function createGame(canvas, opts) {
 
   // ---- Rendering ----------------------------------------------------------
   let waveT = 0;
+  let causticPat = null; // water caustics pattern, created on first draw
   function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
   function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
   function drawWater(w, h, t) {
-    const g = ctx.createLinearGradient(0, 0, 0, h);
-    g.addColorStop(0, "#155273"); g.addColorStop(0.5, "#0f4363"); g.addColorStop(1, "#0a2f45");
+    const shore = shoreY({ w, h });
+    // depth: sky-tinted far edge -> deep blue -> clearer teal shallows by the beach
+    const g = ctx.createLinearGradient(0, 0, 0, shore);
+    g.addColorStop(0, "#2b7fa4"); g.addColorStop(0.16, "#17688b"); g.addColorStop(0.55, "#0f4f72"); g.addColorStop(0.88, "#146384"); g.addColorStop(1, "#2c8ba6");
     ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    // drifting caustic light patches (skipped when the water is crowded)
-    if (!lowFx) {
-      for (let i = 0; i < 7; i++) {
-        const cx = ((i * 173 + Math.sin(t * 0.35 + i) * 60) % (w + 200) + w + 200) % (w + 200) - 100;
-        const cy = ((i * 131 + Math.cos(t * 0.28 + i * 1.7) * 40) % (h + 200) + h + 200) % (h + 200) - 100;
-        const rad = 70 + (i % 3) * 35;
-        const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-        cg.addColorStop(0, "rgba(120,200,235,0.07)"); cg.addColorStop(1, "rgba(120,200,235,0)");
-        ctx.fillStyle = cg; ctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2);
-      }
+    // refracted sunlight: scrolling caustic layers (one when the water is crowded)
+    if (!causticPat) causticPat = ctx.createPattern(causticTile(), "repeat");
+    const layers = lowFx ? [[1.7, 0.12, 9, 6]] : [[1.7, 0.11, 9, 6], [0.95, 0.07, -13, 4]];
+    ctx.save(); ctx.globalCompositeOperation = "screen";
+    for (const [s, op, vx, vy] of layers) {
+      const ox = (t * vx) % (256 * s), oy = (t * vy) % (256 * s);
+      ctx.save(); ctx.globalAlpha = op; ctx.translate(ox, oy); ctx.scale(s, s); ctx.fillStyle = causticPat;
+      ctx.fillRect(-ox / s - 256, -oy / s - 256, w / s + 512, h / s + 512); ctx.restore();
     }
-    // translucent surface layer: lighter, glassier near the top
-    const surf = ctx.createLinearGradient(0, 0, 0, h * 0.6);
-    surf.addColorStop(0, "rgba(150,212,242,0.13)"); surf.addColorStop(1, "rgba(150,212,242,0)");
-    ctx.fillStyle = surf; ctx.fillRect(0, 0, w, h * 0.6);
-    // drifting sun-glitter patch
-    const gx = w * 0.62 + Math.sin(t * 0.21) * w * 0.16, gy = h * 0.34 + Math.cos(t * 0.16) * h * 0.1, grd = Math.min(w, h) * 0.5;
-    const sun = ctx.createRadialGradient(gx, gy, 0, gx, gy, grd);
-    sun.addColorStop(0, "rgba(200,235,255,0.11)"); sun.addColorStop(0.5, "rgba(200,235,255,0.04)"); sun.addColorStop(1, "rgba(200,235,255,0)");
-    ctx.fillStyle = sun; ctx.fillRect(gx - grd, gy - grd, grd * 2, grd * 2);
-    // moving diagonal light sweep across the surface
-    ctx.save(); ctx.translate(w / 2, h / 2); ctx.rotate(-0.35);
-    const sx = ((t * 55) % (w + 600)) - w / 2 - 300;
-    const sweep = ctx.createLinearGradient(sx - 160, 0, sx + 160, 0);
-    sweep.addColorStop(0, "rgba(255,255,255,0)"); sweep.addColorStop(0.5, "rgba(255,255,255,0.07)"); sweep.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = sweep; ctx.fillRect(sx - 160, -h, 320, h * 2);
     ctx.restore();
-    // three parallax wave layers for depth (with relief: shadow under, light on top)
-    const layers = [
-      { amp: 5, k: 0.016, sp: 0.6, op: 0.05, step: 26 },
-      { amp: 7, k: 0.022, sp: 1.0, op: 0.07, step: 22 },
-      { amp: 4, k: 0.030, sp: 1.6, op: 0.05, step: 20 },
-    ];
-    const rows = Math.max(5, Math.round(h / 78));
-    const wavePath = (y0, Ly, row, dy) => { ctx.beginPath(); for (let x = 0; x <= w; x += Ly.step) { const y = y0 + dy + Math.sin(x * Ly.k + t * Ly.sp + row) * Ly.amp; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } };
-    for (const Ly of layers) {
-      for (let row = 0; row < rows; row++) {
-        const y0 = (row + 0.5) * (h / rows);
-        // trough shadow just below the crest, then the lit crest on top
-        ctx.strokeStyle = `rgba(5,30,50,${Ly.op * 1.6})`; ctx.lineWidth = 3; wavePath(y0, Ly, row, 3); ctx.stroke();
-        ctx.strokeStyle = `rgba(255,255,255,${Ly.op * 1.3})`; ctx.lineWidth = 1.6; wavePath(y0, Ly, row, 0); ctx.stroke();
+    // sky reflection along the far edge
+    const sky = ctx.createLinearGradient(0, 0, 0, h * 0.2);
+    sky.addColorStop(0, "rgba(195,228,246,0.22)"); sky.addColorStop(1, "rgba(195,228,246,0)");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h * 0.2);
+    // sun patch with twinkling glitter
+    const gx = w * 0.62 + Math.sin(t * 0.21) * w * 0.14, gy = h * 0.3 + Math.cos(t * 0.16) * h * 0.08, grd = Math.min(w, h) * 0.55;
+    const sun = ctx.createRadialGradient(gx, gy, 0, gx, gy, grd);
+    sun.addColorStop(0, "rgba(220,240,255,0.16)"); sun.addColorStop(0.45, "rgba(220,240,255,0.05)"); sun.addColorStop(1, "rgba(220,240,255,0)");
+    ctx.fillStyle = sun; ctx.fillRect(gx - grd, gy - grd, grd * 2, grd * 2);
+    if (!lowFx) {
+      ctx.fillStyle = "#ffffff";
+      for (let i = 0; i < 70; i++) {
+        const a = i * 2.399, rr = Math.sqrt((i + 0.5) / 70) * grd * 0.8;
+        const sx = gx + Math.cos(a) * rr, sy = gy + Math.sin(a) * rr * 0.6;
+        const tw = Math.sin(t * (2.2 + (i % 5) * 0.4) + i * 1.7);
+        if (tw > 0.55) { ctx.globalAlpha = (tw - 0.55) * 1.6 * (1 - rr / (grd * 0.8)); ctx.beginPath(); ctx.ellipse(sx, sy, 3.2, 1.1, 0, 0, Math.PI * 2); ctx.fill(); }
+      }
+      ctx.globalAlpha = 1;
+    }
+    // swell: rows of crests whose height breathes along x; shadowed trough, lit crest, foam flecks
+    ctx.save(); ctx.lineCap = "round";
+    const rows = Math.max(5, Math.round(shore / 82));
+    for (let row = 0; row < rows; row++) {
+      // uneven spacing and strength so the swell doesn't read as ruled lines
+      const y0 = (row + 0.55 + 0.25 * Math.sin(row * 2.3)) * (shore / rows), ph = row * 1.7, sp = 0.7 + (row % 3) * 0.25, str = (0.7 + 0.3 * Math.sin(row * 1.3 + 0.5)) * (0.55 + 0.45 * (row + 1) / rows); // fainter far away
+      const crest = (x) => Math.sin(x * 0.014 + t * sp + ph) * 7 * (0.55 + 0.45 * Math.sin(x * 0.004 + t * 0.3 + row));
+      const path = (dy) => { ctx.beginPath(); for (let x = -10; x <= w + 10; x += 16) { const y = y0 + dy + crest(x); x === -10 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } };
+      ctx.strokeStyle = `rgba(4,28,48,${0.16 * str})`; ctx.lineWidth = 5; path(4); ctx.stroke();
+      ctx.strokeStyle = `rgba(190,230,250,${0.18 * str})`; ctx.lineWidth = 1.8; path(0); ctx.stroke();
+      if (!lowFx && row % 3 === 1) { // a few foam flecks, only on some crests
+        ctx.setLineDash([2, 34, 3, 61]); ctx.lineDashOffset = -t * 26 - row * 7;
+        ctx.strokeStyle = "rgba(255,255,255,0.42)"; ctx.lineWidth = 1.8; path(-1); ctx.stroke(); ctx.setLineDash([]);
       }
     }
-    // twinkling surface glints
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    for (let i = 0; i < 26; i++) {
-      const gx = (i * 137.5) % w, gy = (i * 89.3) % h, tw = 0.5 + 0.5 * Math.sin(t * 1.7 + i * 1.3);
-      if (tw > 0.62) { ctx.globalAlpha = (tw - 0.62) * 0.7; ctx.beginPath(); ctx.arc(gx, gy, 1.4, 0, Math.PI * 2); ctx.fill(); }
-    }
-    ctx.globalAlpha = 1;
+    ctx.restore();
+    // shallows: sand showing through, with ripple lines on the bottom
+    const sh = ctx.createLinearGradient(0, shore - 90, 0, shore);
+    sh.addColorStop(0, "rgba(214,190,140,0)"); sh.addColorStop(1, "rgba(214,190,140,0.36)");
+    ctx.fillStyle = sh; ctx.fillRect(0, shore - 90, w, 90);
+    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
+    for (let k = 0; k < 4; k++) { const yy = shore - 14 - k * 16; ctx.beginPath(); for (let x = 0; x <= w; x += 12) { const y = yy + Math.sin(x * 0.09 + t * 1.2 + k) * 2; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
     // soft depth vignette
-    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
-    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.28)");
+    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.78);
+    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.22)");
     ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
   }
   function drawShore(w, h) {
@@ -843,14 +879,27 @@ export function createGame(canvas, opts) {
     const g = ctx.createLinearGradient(0, y0, 0, h);
     g.addColorStop(0, "#cdb583"); g.addColorStop(0.16, "#e7d4a4"); g.addColorStop(1, "#d6bd85");
     ctx.fillStyle = g; ctx.fillRect(0, y0, w, SHORE_H);
-    ctx.fillStyle = "rgba(150,120,70,0.3)"; ctx.fillRect(0, y0, w, 9); // wet sand band
-    // foam line where water meets sand
-    ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.beginPath();
-    for (let x = 0; x <= w; x += 14) { const yy = y0 + Math.sin(x * 0.05 + waveT * 1.6) * 3; x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
-    ctx.lineTo(w, y0 - 5); ctx.lineTo(0, y0 - 5); ctx.closePath(); ctx.fill();
+    // wet sand with a faint sky reflection
+    const wet = ctx.createLinearGradient(0, y0, 0, y0 + 18);
+    wet.addColorStop(0, "rgba(120,150,170,0.38)"); wet.addColorStop(1, "rgba(150,120,70,0)");
+    ctx.fillStyle = wet; ctx.fillRect(0, y0, w, 18);
+    // foam edge: two soft white bands breathing with the swell, plus bubbles
+    const edge = (x) => y0 + Math.sin(x * 0.05 + waveT * 1.6) * 3 + Math.sin(x * 0.013 - waveT * 0.9) * 2;
+    ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.beginPath();
+    for (let x = 0; x <= w; x += 12) { const yy = edge(x); x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
+    ctx.lineTo(w, y0 - 7); ctx.lineTo(0, y0 - 7); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.32)"; ctx.beginPath();
+    for (let x = 0; x <= w; x += 12) { const yy = edge(x) - 6 + Math.sin(x * 0.11 + waveT * 2) * 2; x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
+    ctx.lineTo(w, y0 - 17); ctx.lineTo(0, y0 - 17); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    for (let i = 0; i < Math.round(w / 22); i++) {
+      const bx = (i * 61) % w, by = y0 - 3 - ((i * 37) % 9), br = 1 + (i % 3) * 0.6;
+      ctx.globalAlpha = 0.25 + 0.45 * Math.abs(Math.sin(waveT * 1.5 + i)); ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
     // sand speckles
     ctx.fillStyle = "rgba(120,95,55,0.22)";
-    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 10 + ((i * 53) % (SHORE_H - 12)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
+    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 12 + ((i * 53) % (SHORE_H - 14)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
   }
   function drawSaved(sv) {
     const skin = SKINS[sv.sk % SKINS.length], hair = HAIRS[sv.hr % HAIRS.length], suit = SUITS[sv.sid % SUITS.length];
@@ -988,23 +1037,69 @@ export function createGame(canvas, opts) {
     [[o.x, o.y], [o.x + o.w - ps, o.y], [o.x, o.y + o.h - ps], [o.x + o.w - ps, o.y + o.h - ps]].forEach(([x, y]) => { ctx.fillRect(x, y, ps, ps); ctx.fillStyle = "rgba(255,225,185,0.35)"; ctx.fillRect(x, y, ps, 2); ctx.fillStyle = "#4d2f16"; });
   }
   function drawLivboj(x, y, r, hue, glow, label, you, stunned) {
+    const bob = Math.sin(waveT * 2.1 + x * 0.03) * 1.5, tilt = 1 - 0.03 * (0.5 + 0.5 * Math.sin(waveT * 1.4 + y * 0.02));
     ctx.save(); ctx.translate(x, y);
+    // water contact: soft shadow under the ring and a ripple wake
+    if (!lowFx) {
+      ctx.fillStyle = "rgba(3,20,36,0.32)"; ctx.beginPath(); ctx.ellipse(r * 0.12, r * 0.22 + bob * 0.3, r * 1.02, r * 0.78, 0, 0, Math.PI * 2); ctx.fill();
+      const rip = (waveT * 0.9 + x * 0.01) % 1;
+      for (let k = 0; k < 2; k++) {
+        const f = (rip + k * 0.5) % 1;
+        ctx.strokeStyle = `rgba(200,235,255,${(1 - f) * (glow ? 0.5 : 0.28)})`; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.ellipse(0, r * 0.18, r * (1.12 + f * 0.75), r * (0.75 + f * 0.55), 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.translate(0, bob); ctx.scale(1, tilt);
     if (stunned) ctx.globalAlpha = 0.6 + 0.25 * Math.sin(waveT * 20);
-    if (hue != null) { ctx.strokeStyle = `hsl(${hue},85%,60%)`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, r + 5, 0, Math.PI * 2); ctx.stroke(); }
-    if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 20; }
-    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); ctx.fillStyle = "#f4571d"; ctx.fill("evenodd"); ctx.shadowBlur = 0;
-    ctx.fillStyle = "#f4f4f0";
+    // player colour: a soft glowing ring outside the rope
+    if (hue != null) { ctx.save(); ctx.shadowColor = `hsla(${hue},90%,65%,0.9)`; ctx.shadowBlur = 14; ctx.strokeStyle = `hsla(${hue},85%,62%,0.85)`; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, r * 1.36, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+    const donut = () => { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); };
+    // grab rope: threaded through four grommets, sagging outward between them like the real thing
+    if (!lowFx) {
+      const ropePath = (dy) => {
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          const a0 = i * Math.PI / 2, a1 = a0 + Math.PI / 2, am = a0 + Math.PI / 4;
+          const x0 = Math.cos(a0) * r * 0.97, y0 = Math.sin(a0) * r * 0.97 + dy, x1 = Math.cos(a1) * r * 0.97, y1 = Math.sin(a1) * r * 0.97 + dy;
+          const cx = Math.cos(am) * r * 1.75, cy = Math.sin(am) * r * 1.75 + dy; // curve midpoint lands at ~1.22r
+          if (i === 0) ctx.moveTo(x0, y0);
+          ctx.quadraticCurveTo(cx, cy, x1, y1);
+        }
+      };
+      ctx.save(); ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(60,45,25,0.5)"; ctx.lineWidth = 3.4; ropePath(1.3); ctx.stroke();  // shadow / thickness
+      ctx.strokeStyle = "#e9dcb9"; ctx.lineWidth = 2.6; ropePath(0); ctx.stroke();             // rope
+      ctx.setLineDash([2.2, 2.6]); ctx.strokeStyle = "rgba(110,85,45,0.45)"; ctx.lineWidth = 2.6; ropePath(0); ctx.stroke(); // twist
+      ctx.restore();
+    }
+    if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 22; }
+    // body: orange tube with four warm-white bands
+    donut(); ctx.fillStyle = "#ef5a1f"; ctx.fill("evenodd"); ctx.shadowBlur = 0;
+    ctx.fillStyle = "#f7f3e8";
     for (let i = 0; i < 4; i++) { ctx.save(); ctx.rotate(i * Math.PI / 2 + Math.PI / 4); ctx.beginPath(); ctx.arc(0, 0, r, -0.32, 0.32); ctx.arc(0, 0, r * 0.55, 0.32, -0.32, true); ctx.closePath(); ctx.fill(); ctx.restore(); }
-    ctx.strokeStyle = "rgba(0,0,0,0.28)"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
-    // gloss: top-left highlight + bottom-right shading, clipped to the donut
-    const gl = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.1, 0, 0, r);
-    gl.addColorStop(0, "rgba(255,255,255,0.3)"); gl.addColorStop(0.55, "rgba(255,255,255,0)");
-    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); ctx.fill("evenodd");
-    const sh = ctx.createRadialGradient(r * 0.28, r * 0.36, r * 0.1, 0, 0, r);
-    sh.addColorStop(0, "rgba(0,0,0,0.18)"); sh.addColorStop(0.6, "rgba(0,0,0,0)");
-    ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); ctx.fill("evenodd");
-    if (label) { ctx.fillStyle = you ? "#ffd7c7" : "#eaf6ff"; ctx.font = "700 14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(you ? "Du" : label, 0, -r - 8); }
+    // tube shading: light from the top-left across the torus cross-section (dark inner lip, lit crest, dark outer edge)
+    const lx = -r * 0.16, ly = -r * 0.18;
+    const tube = ctx.createRadialGradient(lx, ly, r * 0.5, lx, ly, r * 1.08);
+    tube.addColorStop(0, "rgba(0,0,0,0.42)"); tube.addColorStop(0.16, "rgba(0,0,0,0.08)"); tube.addColorStop(0.38, "rgba(255,255,255,0.30)");
+    tube.addColorStop(0.62, "rgba(255,255,255,0.02)"); tube.addColorStop(0.86, "rgba(0,0,0,0.22)"); tube.addColorStop(1, "rgba(0,0,0,0.45)");
+    donut(); ctx.fillStyle = tube; ctx.fill("evenodd");
+    const dir = ctx.createLinearGradient(-r, -r, r, r);
+    dir.addColorStop(0, "rgba(255,255,255,0.16)"); dir.addColorStop(0.5, "rgba(255,255,255,0)"); dir.addColorStop(1, "rgba(0,0,0,0.28)");
+    donut(); ctx.fillStyle = dir; ctx.fill("evenodd");
+    // grommets where the rope meets the tube
+    if (!lowFx) {
+      for (let i = 0; i < 4; i++) {
+        const a = i * Math.PI / 2, px = Math.cos(a) * r * 0.93, py = Math.sin(a) * r * 0.93;
+        ctx.fillStyle = "#e6d9b8"; ctx.beginPath(); ctx.ellipse(px, py, r * 0.09, r * 0.16, a, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "rgba(70,55,30,0.5)"; ctx.beginPath(); ctx.ellipse(px, py, r * 0.045, r * 0.1, a, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    // edges, specular hot spot on the crest, cool water reflection on the far rim
+    ctx.strokeStyle = "rgba(40,15,0,0.45)"; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(40,15,0,0.55)"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.beginPath(); ctx.ellipse(-r * 0.5, -r * 0.5, r * 0.17, r * 0.08, -Math.PI / 4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(150,215,245,0.45)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, r * 0.94, Math.PI * 0.12, Math.PI * 0.42); ctx.stroke();
+    if (label) { ctx.font = "700 14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.shadowColor = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 4; ctx.fillStyle = you ? "#ffd7c7" : "#eaf6ff"; ctx.fillText(you ? "Du" : label, 0, -r - 12); ctx.shadowBlur = 0; }
     ctx.globalAlpha = 1;
     if (stunned) { ctx.fillStyle = "#fdd23a"; ctx.font = "14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; for (let i = 0; i < 3; i++) { const a = waveT * 4 + i * (Math.PI * 2 / 3); ctx.fillText("★", Math.cos(a) * r * 0.85, -r * 0.95 + Math.sin(a) * r * 0.22); } ctx.textBaseline = "alphabetic"; }
     ctx.restore();
