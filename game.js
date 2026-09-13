@@ -1212,7 +1212,7 @@ export function createGame(canvas, opts) {
     ctx.strokeStyle = "rgba(222,245,255,0.5)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(0, R * 0.72, R * 0.62, R * 0.16, 0, 0, Math.PI, false); ctx.stroke();
     // cheeks + freckles
     ctx.fillStyle = "rgba(240,120,110,0.28)"; ctx.beginPath(); ctx.ellipse(-R * 0.4, R * 0.22, R * 0.16, R * 0.11, 0, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(R * 0.4, R * 0.22, R * 0.16, R * 0.11, 0, 0, Math.PI * 2); ctx.fill();
-    if (freckles && !lowFx) { ctx.fillStyle = "rgba(120,70,40,0.45)"; for (const [fx, fy] of [[-0.42, 0.14], [-0.3, 0.22], [-0.5, 0.26], [0.42, 0.14], [0.3, 0.22], [0.5, 0.26]]) { ctx.beginPath(); ctx.arc(fx * R, fy * R, 0.8, 0, Math.PI * 2); ctx.fill(); } }
+    if (freckles && !lowFx) { ctx.fillStyle = "rgba(120,70,40,0.3)"; for (const [fx, fy] of [[-0.44, 0.1], [-0.34, 0.16], [-0.5, 0.18], [0.44, 0.1], [0.34, 0.16], [0.5, 0.18]]) { ctx.beginPath(); ctx.arc(fx * R, fy * R, 0.55, 0, Math.PI * 2); ctx.fill(); } } // faint, high on the cheeks (lower they read as stubble)
     // hair or a swim cap; some wear goggles pushed up on the forehead
     if (cap) {
       shadedEllipse(0, -R * 0.34, R * 0.74, R * 0.58, ["#ff7aa8", "#ffd23a", "#2dd4bf"][id % 3]); // bright caps (white read as a bald head)
