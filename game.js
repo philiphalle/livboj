@@ -142,6 +142,8 @@ function makeWhirls(idx, w, h) {
 const WHIRL_PULL = 30, WHIRL_SPIN = 55, WHIRL_PLAYER = 0.35, WHIRL_CORE = 0.16;
 const SWAMP_SLOW = 0.55;
 const inRect = (x, y, z) => x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h;
+// Swamps are drawn as blobs (an ellipse inscribed in the zone), so the slow zone is that ellipse too.
+const inSwamp = (x, y, z) => { const nx = (x - z.x - z.w / 2) / (z.w / 2), ny = (y - z.y - z.h / 2) / (z.h / 2); return nx * nx + ny * ny <= 1.08; };
 function circleHitsRect(px, py, pr, o) {
   const cx = Math.max(o.x, Math.min(px, o.x + o.w));
   const cy = Math.max(o.y, Math.min(py, o.y + o.h));
@@ -592,7 +594,7 @@ export function createGame(canvas, opts) {
     p.dashCooldown = Math.max(0, p.dashCooldown - dt);
     p.dashActive = Math.max(0, p.dashActive - dt);
     if (input.dash && p.dashCooldown === 0) { p.dashActive = 0.18; p.dashCooldown = 0.9; if (p.id === selfId) sDash(); }
-    const speed = 300 * (p.dashActive > 0 ? 2.1 : 1) * (swamps.some((z) => inRect(p.x, p.y, z)) ? SWAMP_SLOW : 1);
+    const speed = 300 * (p.dashActive > 0 ? 2.1 : 1) * (swamps.some((z) => inSwamp(p.x, p.y, z)) ? SWAMP_SLOW : 1);
     p.x += input.dx * speed * dt; p.y += input.dy * speed * dt;
     for (const o of obstacles) { const hit = circleHitsRect(p.x, p.y, p.r, o); if (hit) { p.x = hit.x; p.y = hit.y; } }
     p.x = Math.max(p.r, Math.min(world.w - p.r, p.x));
@@ -609,29 +611,47 @@ export function createGame(canvas, opts) {
     }
   }
   function updateMonsters(dt) {
-    const mspeed = 45 + levelIndex * 8;
+    // Movement model: a heading that turns at a limited rate, a slow cruise,
+    // a lunge when prey is close, a curving wander when there is nothing to
+    // hunt, and a dive cycle (under water it can't bite and moves faster).
+    const cruise = 40 + levelIndex * 6, TURN = 1.9;
+    const angDiff = (a, b) => { let d = b - a; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d; };
     for (const m of monsters) {
-      m.full = Math.max(0, (m.full || 0) - dt); // satiated after a meal: drifts, doesn't hunt
+      if (m.heading === undefined) { m.heading = m.dir || 0; m.speed = cruise; m.nextDive = 6 + Math.random() * 8; m.sub = 0; m.dive = 0; m.wanderT = Math.random() * 10; }
+      m.full = Math.max(0, (m.full || 0) - dt);
+      m.wob = (m.wob || 0) + dt * 3;
+      m.nextDive -= dt;
+      if (m.nextDive <= 0 && !(m.dive > 0)) { m.dive = 3.4; m.nextDive = 9 + Math.random() * 9; }
+      if (m.dive > 0) m.dive -= dt;
+      const wantSub = m.dive > 0.7 ? 1 : 0; m.sub += (wantSub - m.sub) * Math.min(1, dt * 3);
       let best = null, bd = 1e9;
-      if (!(m.full > 0)) for (const s of swimmers) { const d = Math.hypot(s.x - m.x, s.y - m.y); if (d < bd) { bd = d; best = s; } }
-      if (best) { const ang = Math.atan2(best.y - m.y, best.x - m.x); const k = Math.min(1, dt * 1.8); m.vx += (Math.cos(ang) * mspeed - m.vx) * k; m.vy += (Math.sin(ang) * mspeed - m.vy) * k; }
-      else if (Math.hypot(m.vx, m.vy) < 12) { const a = Math.random() * Math.PI * 2; m.vx = Math.cos(a) * mspeed; m.vy = Math.sin(a) * mspeed; }
-      m.x += m.vx * dt; m.y += m.vy * dt; m.wob = (m.wob || 0) + dt * 3;
-      // docks are solid for monsters too: push out and slide along the dock (no bounce, so a hunt flows around it)
+      if (!(m.full > 0) && m.sub < 0.5) for (const s of swimmers) { const d = Math.hypot(s.x - m.x, s.y - m.y); if (d < bd) { bd = d; best = s; } }
+      let want, targetSpeed;
+      if (best) { want = Math.atan2(best.y - m.y, best.x - m.x); targetSpeed = bd < 150 ? cruise * 1.9 : cruise; }
+      else { m.wanderT += dt; want = m.heading + Math.sin(m.wanderT * 0.7 + m.id) * 0.8; targetSpeed = cruise * (m.sub > 0.5 ? 1.3 : 0.7); }
+      if (!best) { // keep off the walls while wandering
+        const margin = 90, cx = world.w / 2, cy = shoreY(world) / 2;
+        if (m.x < margin || m.x > world.w - margin || m.y < margin || m.y > shoreY(world) - margin) want = Math.atan2(cy - m.y, cx - m.x);
+      }
+      const d = angDiff(m.heading, want); m.heading += Math.max(-TURN * dt, Math.min(TURN * dt, d));
+      m.speed += (targetSpeed - m.speed) * Math.min(1, dt * 1.5);
+      m.vx = Math.cos(m.heading) * m.speed; m.vy = Math.sin(m.heading) * m.speed;
+      m.x += m.vx * dt; m.y += m.vy * dt;
+      // docks are solid: push out, slide along, and turn the heading with the slide
       for (const o of obstacles) {
-        const hit = circleHitsRect(m.x, m.y, m.r * 0.75, o);
-        if (!hit) continue;
+        const hit = circleHitsRect(m.x, m.y, m.r * 0.75, o); if (!hit) continue;
         m.x = hit.x; m.y = hit.y;
         const dot = m.vx * hit.nx + m.vy * hit.ny;
-        if (dot < 0) { m.vx -= dot * hit.nx; m.vy -= dot * hit.ny; }
-        if (Math.hypot(m.vx, m.vy) < mspeed * 0.5) { // pinned head-on: pick a way along the dock
-          const tx = -hit.ny, ty = hit.nx, sgn = (best ? Math.sign((best.x - m.x) * tx + (best.y - m.y) * ty) : (Math.random() < 0.5 ? -1 : 1)) || 1;
-          m.vx = tx * sgn * mspeed; m.vy = ty * sgn * mspeed;
+        if (dot < 0) {
+          m.vx -= dot * hit.nx; m.vy -= dot * hit.ny;
+          if (Math.hypot(m.vx, m.vy) < cruise * 0.4) { const tx = -hit.ny, ty = hit.nx, sgn = (best ? Math.sign((best.x - m.x) * tx + (best.y - m.y) * ty) : 1) || 1; m.vx = tx * sgn * cruise; m.vy = ty * sgn * cruise; }
+          m.heading = Math.atan2(m.vy, m.vx);
         }
       }
-      if (m.x < m.r || m.x > world.w - m.r) { m.vx *= -1; m.x = Math.max(m.r, Math.min(world.w - m.r, m.x)); }
-      if (m.y < m.r || m.y > shoreY(world) - m.r) { m.vy *= -1; m.y = Math.max(m.r, Math.min(shoreY(world) - m.r, m.y)); }
-      m.dir = Math.atan2(m.vy, m.vx);
+      if (m.x < m.r || m.x > world.w - m.r) { m.x = Math.max(m.r, Math.min(world.w - m.r, m.x)); m.heading = Math.atan2(m.vy, -m.vx); }
+      if (m.y < m.r || m.y > shoreY(world) - m.r) { m.y = Math.max(m.r, Math.min(shoreY(world) - m.r, m.y)); m.heading = Math.atan2(-m.vy, m.vx); }
+      m.heading = Math.atan2(Math.sin(m.heading), Math.cos(m.heading)); // keep in [-π, π]
+      m.dir = m.heading;
     }
   }
   function updateSim(dt) {
@@ -646,7 +666,7 @@ export function createGame(canvas, opts) {
     selfPos.stun = Math.max(0, (selfPos.stun || 0) - dt);
     selfPos.stunCd = Math.max(0, (selfPos.stunCd || 0) - dt);
     if (meP && selfPos.stun <= 0 && selfPos.stunCd <= 0) {
-      for (const m of monsters) { if (Math.hypot(meP.x - m.x, meP.y - m.y) < m.r + meP.r) { selfPos.stun = 1.0; selfPos.stunCd = 1.5; sStun(); break; } }
+      for (const m of monsters) { if (!(m.sub > 0.5) && Math.hypot(meP.x - m.x, meP.y - m.y) < m.r + meP.r) { selfPos.stun = 1.0; selfPos.stunCd = 1.5; sStun(); break; } }
     }
     if (meP) { movePlayer(meP, dt, selfPos.stun > 0 ? { dx: 0, dy: 0, dash: false } : localInput()); whirlPull(meP, whirls, dt, WHIRL_PLAYER); meP.stunned = selfPos.stun > 0; selfPos.x = meP.x; selfPos.y = meP.y; }
     for (const p of players.values()) { if (p.id !== selfId) p.dashActive = Math.max(0, p.dashActive - dt); }
@@ -692,7 +712,7 @@ export function createGame(canvas, opts) {
       // eating it (a red danger ring rises) so a rescue can still snatch them
       // back; a satiated monster can't bite. Counts as a miss; livboj is safe.
       let biter = null;
-      for (const m of monsters) { if (!(m.full > 0) && Math.hypot(s.x - m.x, s.y - m.y) < m.r + s.r) { biter = m; break; } }
+      for (const m of monsters) { if (!(m.full > 0) && !(m.sub > 0.5) && Math.hypot(s.x - m.x, s.y - m.y) < m.r + s.r) { biter = m; break; } }
       s.chomp = biter ? (s.chomp || 0) + dt : Math.max(0, (s.chomp || 0) - dt * 1.5);
       if (biter && s.chomp >= EAT_DWELL) {
         biter.full = 1.5;
@@ -721,7 +741,7 @@ export function createGame(canvas, opts) {
     selfPos.dashActive = Math.max(0, selfPos.dashActive - dt);
     selfPos.dashCd = Math.max(0, selfPos.dashCd - dt);
     if (input.dash && selfPos.dashCd === 0) { selfPos.dashActive = 0.18; selfPos.dashCd = 0.9; sDash(); }
-    const sp = 300 * (selfPos.dashActive > 0 ? 2.1 : 1) * ((lastView.swamps || []).some((z) => inRect(selfPos.x, selfPos.y, z)) ? SWAMP_SLOW : 1);
+    const sp = 300 * (selfPos.dashActive > 0 ? 2.1 : 1) * ((lastView.swamps || []).some((z) => inSwamp(selfPos.x, selfPos.y, z)) ? SWAMP_SLOW : 1);
     selfPos.x += input.dx * sp * dt; selfPos.y += input.dy * sp * dt;
     for (const o of (lastView.obstacles || [])) { const hit = circleHitsRect(selfPos.x, selfPos.y, selfPos.r, o); if (hit) { selfPos.x = hit.x; selfPos.y = hit.y; } }
     const w = lastView.world;
@@ -742,7 +762,7 @@ export function createGame(canvas, opts) {
       swamps: swamps.map((z) => [z.x, z.y, z.w, z.h]),
       whirls: whirls.map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
       swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr, +Math.min(1, (s.chomp || 0) / EAT_DWELL).toFixed(2)]),
-      monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r]),
+      monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r, +(m.sub || 0).toFixed(2)]),
       players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
       fx: fxOut,
       // joiners only ever see team games, so send the top team entries (not solo runs)
@@ -778,7 +798,7 @@ export function createGame(canvas, opts) {
     for (const m of d.monsters || []) {
       seenM.add(m[0]);
       const cur = iMonster.get(m[0]) || { x: m[1], y: m[2] };
-      cur.tx = m[1]; cur.ty = m[2]; cur.dir = m[3]; cur.r = m[4]; cur.wob = cur.wob || 0;
+      cur.tx = m[1]; cur.ty = m[2]; cur.dir = m[3]; cur.r = m[4]; cur.sub = m[5] || 0; cur.wob = cur.wob || 0;
       if (cur.x === undefined) { cur.x = m[1]; cur.y = m[2]; }
       iMonster.set(m[0], cur);
     }
@@ -1039,22 +1059,32 @@ export function createGame(canvas, opts) {
     ctx.lineCap = "butt";
   }
   function drawSwamp(z) {
-    // murky, translucent water with a soft edge
-    const g = ctx.createLinearGradient(z.x, z.y, z.x, z.y + z.h);
-    g.addColorStop(0, "rgba(70,95,40,0.42)"); g.addColorStop(1, "rgba(45,70,30,0.55)");
-    ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(z.x, z.y, z.w, z.h, 28) : ctx.rect(z.x, z.y, z.w, z.h); ctx.fill();
-    ctx.strokeStyle = "rgba(120,150,70,0.35)"; ctx.lineWidth = 3; ctx.stroke();
-    // lily pads (bobbing)
-    for (let i = 0; i < 7; i++) {
-      const px = z.x + 20 + ((i * 131) % Math.max(1, z.w - 40)), py = z.y + 18 + ((i * 89) % Math.max(1, z.h - 36)), r = 7 + (i % 3) * 2, wob = Math.sin(waveT * 1.2 + i) * 1.5;
-      ctx.fillStyle = "rgba(90,150,70,0.9)"; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.arc(px, py + wob, r, 0.35, Math.PI * 2 - 0.35); ctx.closePath(); ctx.fill();
+    // an organic blob (three sine harmonics on an ellipse), feathered edge, murk thickening inward
+    const cx = z.x + z.w / 2, cy = z.y + z.h / 2, rx = z.w / 2, ry = z.h / 2, seed = z.x * 0.03 + z.y * 0.07;
+    const rad = (a) => 1 + 0.07 * Math.sin(a * 3 + seed) + 0.05 * Math.sin(a * 5 + seed * 1.3) + 0.03 * Math.sin(a * 8 - seed);
+    const blob = (k) => { ctx.beginPath(); for (let i = 0; i <= 64; i++) { const a = i / 64 * Math.PI * 2, f = rad(a) * k; const x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.closePath(); };
+    for (let k = 3; k >= 1; k--) { blob(1 + k * 0.045); ctx.fillStyle = "rgba(70,95,40,0.07)"; ctx.fill(); }
+    const g = ctx.createRadialGradient(cx, cy, Math.min(rx, ry) * 0.2, cx, cy, Math.max(rx, ry));
+    g.addColorStop(0, "rgba(45,70,30,0.62)"); g.addColorStop(0.7, "rgba(60,90,40,0.45)"); g.addColorStop(1, "rgba(70,95,40,0.28)");
+    blob(1); ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = "rgba(120,150,70,0.22)"; ctx.lineWidth = 2; ctx.stroke();
+    // scum streaks drifting on the surface
+    ctx.strokeStyle = "rgba(150,170,90,0.18)"; ctx.lineWidth = 3; ctx.lineCap = "round";
+    for (let i = 0; i < 5; i++) { const a = seed + i * 1.3, px = cx + Math.cos(a) * rx * 0.5, py = cy + Math.sin(a) * ry * 0.5 + Math.sin(waveT * 0.5 + i) * 3; ctx.beginPath(); ctx.moveTo(px - 18, py); ctx.quadraticCurveTo(px, py - 4, px + 18, py + 2); ctx.stroke(); }
+    // lily pads (bobbing) inside the blob, a few with a flower
+    for (let i = 0; i < 8; i++) {
+      const a = seed * 0.7 + i * 2.4, f = 0.25 + ((i * 37) % 60) / 100, px = cx + Math.cos(a) * rx * f, py = cy + Math.sin(a) * ry * f, r = 7 + (i % 3) * 2, wob = Math.sin(waveT * 1.2 + i) * 1.5;
+      ctx.fillStyle = "rgba(90,150,70,0.92)"; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.arc(px, py + wob, r, 0.35 + i, Math.PI * 2 - 0.35 + i); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = "rgba(60,110,50,0.5)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.lineTo(px + Math.cos(i) * r * 0.8, py + wob + Math.sin(i) * r * 0.8); ctx.stroke();
       ctx.fillStyle = "rgba(160,200,120,0.5)"; ctx.beginPath(); ctx.arc(px - r * 0.3, py + wob - r * 0.3, r * 0.35, 0, Math.PI * 2); ctx.fill();
+      if (i % 4 === 0) { ctx.fillStyle = "rgba(255,190,220,0.9)"; ctx.beginPath(); ctx.arc(px + r * 0.4, py + wob - r * 0.5, 2.4, 0, Math.PI * 2); ctx.fill(); }
     }
-    // reeds (swaying)
-    ctx.strokeStyle = "rgba(60,95,35,0.85)"; ctx.lineWidth = 2; ctx.lineCap = "round";
-    for (let i = 0; i < 9; i++) {
-      const rx = z.x + 12 + ((i * 97) % Math.max(1, z.w - 24)), ry = z.y + z.h - 6 - ((i * 53) % Math.max(20, z.h * 0.5)), hgt = 22 + (i % 3) * 8, sway = Math.sin(waveT * 1.6 + i) * 3;
-      ctx.beginPath(); ctx.moveTo(rx, ry); ctx.quadraticCurveTo(rx + sway, ry - hgt * 0.6, rx + sway * 1.6, ry - hgt); ctx.stroke();
+    // reeds around the rim, swaying; every third one a cattail
+    for (let i = 0; i < 14; i++) {
+      const a = seed + i * 0.45 + (i % 2) * 0.2, f = rad(a) * (0.86 + (i % 3) * 0.05), rx0 = cx + Math.cos(a) * rx * f, ry0 = cy + Math.sin(a) * ry * f, hgt = 18 + (i % 4) * 7, sway = Math.sin(waveT * 1.6 + i) * 3;
+      ctx.strokeStyle = i % 3 ? "rgba(60,95,35,0.85)" : "rgba(95,120,45,0.85)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(rx0, ry0); ctx.quadraticCurveTo(rx0 + sway, ry0 - hgt * 0.6, rx0 + sway * 1.6, ry0 - hgt); ctx.stroke();
+      if (i % 3 === 0) { ctx.fillStyle = "#6b4a2a"; ctx.beginPath(); ctx.ellipse(rx0 + sway * 1.6, ry0 - hgt, 1.8, 4, 0, 0, Math.PI * 2); ctx.fill(); }
     }
     ctx.lineCap = "butt";
   }
@@ -1069,33 +1099,47 @@ export function createGame(canvas, opts) {
     // shadow and wet reflection under the deck
     ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 5, o.y + 9, o.w, o.h, 3); ctx.fill();
     ctx.fillStyle = "rgba(0,10,20,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 4, o.y + o.h - 2, o.w + 8, 14, 4); ctx.fill();
-    for (const [px, py] of posts) { // posts below the deck: dark base with a ripple ring
+    for (const [px, py] of posts) {
       ctx.fillStyle = "rgba(0,10,20,0.25)"; ctx.beginPath(); ctx.ellipse(px + 2, py + 5, pr * 1.3, pr * 0.8, 0, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = "rgba(220,240,250,0.28)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(px, py + 3, pr * 1.7, pr * 0.9, 0, 0, Math.PI * 2); ctx.stroke();
       ctx.fillStyle = "#3d2612"; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
     }
-    // deck: planks laid across the dock, each with its own tone, gap, grain and worn ends
-    const nn = Math.max(3, Math.round(L / 18)), pw = L / nn;
+    // deck: planks laid across the dock — mixed wood tones and grey weathered boards, the odd one missing or cracked
+    const PALETTE = ["#a8713d", "#b07a44", "#9a6635", "#a46b38", "#8d7a62", "#7f7468"];
+    const nn = Math.max(3, Math.round(L / 18)), pw = L / nn, ins = 0.6;
+    const rect = (s0) => horiz ? [o.x + s0 + ins, o.y, pw - ins * 2, o.h] : [o.x, o.y + s0 + ins, o.w, pw - ins * 2];
     for (let i = 0; i < nn; i++) {
-      const s0 = pw * i, tone = 0.85 + rnd(i) * 0.3, ins = 0.6;
-      const base = tint("#a8713d", tone);
+      const s0 = pw * i, r1 = rnd(i), r2 = rnd(i + 31), r3 = rnd(i + 71);
+      if (r3 > 0.93 && i > 0 && i < nn - 1) { // missing plank: dark water and two broken stubs
+        ctx.fillStyle = "rgba(6,28,44,0.78)"; ctx.fillRect(...rect(s0));
+        const stub = T * (0.16 + rnd(i + 5) * 0.14), col = shade(PALETTE[Math.floor(r1 * PALETTE.length)]);
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        if (horiz) { const x0 = o.x + s0 + ins, x1 = x0 + pw - ins * 2; ctx.moveTo(x0, o.y); ctx.lineTo(x1, o.y); ctx.lineTo(x1, o.y + stub * 0.7); ctx.lineTo((x0 + x1) / 2, o.y + stub * 1.3); ctx.lineTo(x0, o.y + stub * 0.9); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(x0, o.y + o.h); ctx.lineTo(x1, o.y + o.h); ctx.lineTo(x1, o.y + o.h - stub * 1.1); ctx.lineTo((x0 + x1) / 2, o.y + o.h - stub * 0.6); ctx.lineTo(x0, o.y + o.h - stub); ctx.closePath(); ctx.fill(); }
+        else { const y0 = o.y + s0 + ins, y1 = y0 + pw - ins * 2; ctx.moveTo(o.x, y0); ctx.lineTo(o.x, y1); ctx.lineTo(o.x + stub * 0.7, y1); ctx.lineTo(o.x + stub * 1.3, (y0 + y1) / 2); ctx.lineTo(o.x + stub * 0.9, y0); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(o.x + o.w, y0); ctx.lineTo(o.x + o.w, y1); ctx.lineTo(o.x + o.w - stub * 1.1, y1); ctx.lineTo(o.x + o.w - stub * 0.6, (y0 + y1) / 2); ctx.lineTo(o.x + o.w - stub, y0); ctx.closePath(); ctx.fill(); }
+        continue;
+      }
+      const base = tint(PALETTE[Math.floor(r1 * PALETTE.length)], 0.9 + r2 * 0.2);
       const g = horiz ? ctx.createLinearGradient(0, o.y, 0, o.y + o.h) : ctx.createLinearGradient(o.x, 0, o.x + o.w, 0);
       g.addColorStop(0, hi(base)); g.addColorStop(0.45, base); g.addColorStop(1, shade(base));
-      ctx.fillStyle = g;
-      if (horiz) ctx.fillRect(o.x + s0 + ins, o.y, pw - ins * 2, o.h); else ctx.fillRect(o.x, o.y + s0 + ins, o.w, pw - ins * 2);
+      ctx.fillStyle = g; ctx.fillRect(...rect(s0));
       // grain: two faint lines along the plank
       ctx.strokeStyle = "rgba(60,35,15,0.22)"; ctx.lineWidth = 1;
       for (let k = 0; k < 2; k++) { const f = 0.3 + k * 0.4 + (rnd(i + 7 * k) - 0.5) * 0.15; ctx.beginPath(); if (horiz) { const x = o.x + s0 + pw * f; ctx.moveTo(x, o.y + 2); ctx.lineTo(x + (rnd(i + k) - 0.5) * 2, o.y + o.h - 2); } else { const y = o.y + s0 + pw * f; ctx.moveTo(o.x + 2, y); ctx.lineTo(o.x + o.w - 2, y + (rnd(i + k) - 0.5) * 2); } ctx.stroke(); }
-      // nails at both ends
+      // a knot on some planks, a crack on others
+      if (rnd(i + 13) > 0.8) { const kx = horiz ? o.x + s0 + pw / 2 : o.x + o.w * (0.3 + r2 * 0.4), ky = horiz ? o.y + o.h * (0.3 + r2 * 0.4) : o.y + s0 + pw / 2; ctx.fillStyle = "rgba(60,35,15,0.5)"; ctx.beginPath(); ctx.ellipse(kx, ky, 2.2, 1.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = "rgba(60,35,15,0.35)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.ellipse(kx, ky, 3.6, 2.6, 0, 0, Math.PI * 2); ctx.stroke(); }
+      if (rnd(i + 43) > 0.86) { ctx.strokeStyle = "rgba(20,12,5,0.7)"; ctx.lineWidth = 1; ctx.beginPath(); if (horiz) { const x = o.x + s0 + pw * 0.5; ctx.moveTo(x - 1, o.y + o.h * 0.15); ctx.lineTo(x + 1.5, o.y + o.h * 0.5); ctx.lineTo(x - 0.5, o.y + o.h * 0.9); } else { const y = o.y + s0 + pw * 0.5; ctx.moveTo(o.x + o.w * 0.15, y - 1); ctx.lineTo(o.x + o.w * 0.5, y + 1.5); ctx.lineTo(o.x + o.w * 0.9, y - 0.5); } ctx.stroke(); }
+      // nails at both ends (one occasionally missing)
       ctx.fillStyle = "rgba(40,30,25,0.7)";
-      for (const e of [0.18, 0.82]) { const cx = horiz ? o.x + s0 + pw / 2 : o.x + o.w * e, cy = horiz ? o.y + o.h * e : o.y + s0 + pw / 2; ctx.beginPath(); ctx.arc(cx, cy, 1.1, 0, Math.PI * 2); ctx.fill(); }
-      // the odd darker, weathered plank
-      if (rnd(i + 99) > 0.86) { ctx.fillStyle = "rgba(40,60,50,0.18)"; if (horiz) ctx.fillRect(o.x + s0 + ins, o.y, pw - ins * 2, o.h); else ctx.fillRect(o.x, o.y + s0 + ins, o.w, pw - ins * 2); }
+      for (const e of [0.18, 0.82]) { if (rnd(i + 200 + e * 10) > 0.9) continue; const cx = horiz ? o.x + s0 + pw / 2 : o.x + o.w * e, cy = horiz ? o.y + o.h * e : o.y + s0 + pw / 2; ctx.beginPath(); ctx.arc(cx, cy, 1.1, 0, Math.PI * 2); ctx.fill(); }
     }
-    // gaps between planks (water shows through, dark)
+    // gaps between planks (water shows through)
     ctx.strokeStyle = "rgba(10,25,35,0.55)"; ctx.lineWidth = 1.2;
     for (let i = 1; i < nn; i++) { ctx.beginPath(); if (horiz) { const x = o.x + pw * i; ctx.moveTo(x, o.y); ctx.lineTo(x, o.y + o.h); } else { const y = o.y + pw * i; ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y); } ctx.stroke(); }
-    // edge beams: lit near edge, dark far edge
+    // moss along the shaded edge, lit near edge, dark far edge
+    ctx.fillStyle = "rgba(70,110,60,0.3)"; if (horiz) ctx.fillRect(o.x, o.y + o.h - 6, o.w, 6); else ctx.fillRect(o.x + o.w - 6, o.y, 6, o.h);
     ctx.fillStyle = "rgba(255,225,185,0.45)"; ctx.fillRect(o.x, o.y, horiz ? o.w : 2.5, horiz ? 2.5 : o.h);
     ctx.fillStyle = "rgba(20,10,4,0.5)"; if (horiz) ctx.fillRect(o.x, o.y + o.h - 3, o.w, 3); else ctx.fillRect(o.x + o.w - 3, o.y, 3, o.h);
     // post tops above the deck, with a highlight
@@ -1345,8 +1389,19 @@ export function createGame(canvas, opts) {
   }
   function drawSplash(sp) { const p = sp.t / 0.6; ctx.strokeStyle = sp.good ? `rgba(120,230,160,${1 - p})` : `rgba(230,120,120,${1 - p})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sp.x, sp.y, 6 + p * 26, 0, Math.PI * 2); ctx.stroke(); }
   function drawMonster(m) {
-    const R = m.r || 30, t = m.wob || 0, flip = Math.cos(m.dir || 0) < 0 ? -1 : 1, bob = Math.sin(t) * 2;
-    ctx.save(); ctx.translate(m.x, m.y + bob); ctx.scale(flip, 1);
+    const R = m.r || 30, t = m.wob || 0, sub = m.sub || 0;
+    // eased turn instead of a snap flip; the nose dips or rises with the heading; a diving beast sinks and fades
+    const faceWant = Math.cos(m.dir || 0) < 0 ? -1 : 1;
+    m.face = m.face === undefined ? faceWant : m.face + (faceWant - m.face) * 0.1;
+    const pitch = -Math.sin(m.dir || 0) * 0.3 * Math.sign(m.face || 1), bob = Math.sin(t) * 2 + sub * R * 0.5;
+    ctx.save(); ctx.translate(m.x, m.y);
+    if (sub > 0.15) { // surface disturbance where it went under
+      ctx.strokeStyle = `rgba(220,242,250,${0.4 * sub})`; ctx.lineWidth = 2;
+      for (let k = 0; k < 3; k++) { const f = ((t * 0.35 + k / 3) % 1); ctx.globalAlpha = (1 - f) * sub; ctx.beginPath(); ctx.ellipse(0, R * 0.3, R * (0.6 + f * 1.6), R * (0.25 + f * 0.7), 0, 0, Math.PI * 2); ctx.stroke(); }
+      ctx.globalAlpha = sub; ctx.fillStyle = "rgba(222,242,250,0.6)"; for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.arc(Math.sin(t * 1.3 + k * 2) * R * 0.8, R * 0.25 + Math.cos(t * 0.9 + k) * R * 0.3, 1.5 + (k % 2), 0, Math.PI * 2); ctx.fill(); }
+    }
+    ctx.globalAlpha = 1 - sub * 0.8;
+    ctx.translate(0, bob); ctx.scale(m.face, 1 - sub * 0.4); ctx.rotate(pitch * 0.35);
     const dark = "#1f4f2b", mid = "#3f8f4a", light = "#6cc276", belly = "#bfd98f";
     const body = ctx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.2, -R * 0.15, 0, R * 1.7);
     body.addColorStop(0, light); body.addColorStop(0.5, mid); body.addColorStop(1, "#245f35");
@@ -1363,7 +1418,7 @@ export function createGame(canvas, opts) {
     ctx.strokeStyle = "rgba(230,248,255,0.5)"; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.42, R * 1.15, R * 0.28, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke();
 
     // tail: tapering S-curve ending in a fluke
-    const tw = Math.sin(t * 1.5) * R * 0.22;
+    const tw = Math.sin(t * 2.2 - 3.6) * R * 0.24; // the same wave, further down the body
     ctx.strokeStyle = body; ctx.lineCap = "round";
     ctx.lineWidth = R * 0.34; ctx.beginPath(); ctx.moveTo(-R * 1.1, R * 0.05); ctx.quadraticCurveTo(-R * 1.7, -R * 0.1 + tw, -R * 2.05, -R * 0.3 + tw * 0.6); ctx.stroke();
     ctx.lineWidth = R * 0.18; ctx.beginPath(); ctx.moveTo(-R * 2.0, -R * 0.3 + tw * 0.6); ctx.quadraticCurveTo(-R * 2.3, -R * 0.55 + tw, -R * 2.45, -R * 0.75 + tw * 0.8); ctx.stroke();
@@ -1372,7 +1427,7 @@ export function createGame(canvas, opts) {
 
     // back humps with a serrated dorsal ridge, each hump shaded and scaled
     for (let i = 0; i < 3; i++) {
-      const hx = -R * 1.15 + i * R * 0.6, hy = Math.sin(t * 1.6 + i * 0.9) * R * 0.14, hr = R * 0.42 - i * 2;
+      const hx = -R * 1.15 + i * R * 0.6, hy = Math.sin(t * 2.2 - i * 1.1) * R * 0.16, hr = R * 0.42 - i * 2; // a wave travelling down the back
       ctx.fillStyle = dark; for (let k = -1; k <= 1; k++) { const sx = hx + k * hr * 0.42; ctx.beginPath(); ctx.moveTo(sx - hr * 0.2, hy - hr * 0.8); ctx.lineTo(sx, hy - hr * 1.28 + Math.abs(k) * hr * 0.15); ctx.lineTo(sx + hr * 0.2, hy - hr * 0.8); ctx.closePath(); ctx.fill(); }
       ctx.fillStyle = body; ctx.beginPath(); ctx.arc(hx, hy, hr, Math.PI, 0); ctx.fill();
       ctx.strokeStyle = "rgba(20,60,30,0.35)"; ctx.lineWidth = 1; for (let row = 0; row < 2; row++) for (let k = -2; k <= 2; k++) { ctx.beginPath(); ctx.arc(hx + k * hr * 0.36 + (row % 2) * hr * 0.18, hy - hr * 0.25 - row * hr * 0.3, hr * 0.18, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); } // scales
@@ -1404,7 +1459,7 @@ export function createGame(canvas, opts) {
     for (let i = 0; i < 4; i++) { const nt = 0.3 + i * 0.18, nx = R * (0.32 + nt * 0.58) + sway * nt, ny = R * (-0.1 - 1.05 * nt * nt); ctx.beginPath(); ctx.moveTo(nx - 3.5, ny); ctx.lineTo(nx - 0.5, ny - 7); ctx.lineTo(nx + 3, ny); ctx.closePath(); ctx.fill(); }
 
     // head: brow ridge, nostrils, jaws with gums, teeth top and bottom, tongue, slit-pupil eye, ear frill
-    ctx.save(); ctx.translate(R * 1.02 + sway, -R * 1.08); ctx.rotate(-0.35);
+    ctx.save(); ctx.translate(R * 1.02 + sway, -R * 1.08); ctx.rotate(-0.35 + pitch);
     const gape = (Math.sin(t * 3) + 1) / 2 * R * 0.18 + 1.5;
     // lower jaw (opens downward)
     ctx.save(); ctx.translate(R * 0.18, R * 0.12); ctx.rotate(gape / R * 1.6);
@@ -1693,7 +1748,7 @@ export function createGame(canvas, opts) {
       sw: authoritative ? swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
       self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
       players: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
-      mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30]),
+      mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30, +(m.dir || 0).toFixed(3), +(m.sub || 0).toFixed(2)]),
       swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       obstacles: (authoritative ? obstacles : (lastView && lastView.obstacles) || []).map((o) => [Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h)]),
       whirls: (authoritative ? whirls : (lastView && lastView.whirls) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
