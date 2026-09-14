@@ -71,8 +71,9 @@ export class Room {
 }
 
 // ---- Global leaderboard ----------------------------------------------------
-const KEEP = 100;    // stored
-const SHOW = 50;     // returned
+const KEEP = 500;    // stored (by score)
+const SHOW = 50;     // top entries returned
+const RECENT_MS = 7 * 24 * 3600 * 1000, RECENT_MAX = 300; // also returned: every result from the last week (player of the day/week)
 const MAX_POST = 60; // entries per POST (a host's whole local list fits)
 
 const str = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
@@ -102,7 +103,11 @@ export class Board {
 
   async fetch(request) {
     const url = new URL(request.url);
-    if (request.method === "GET") return json({ entries: (await this.all()).slice(0, SHOW) });
+    if (request.method === "GET") {
+      const all = await this.all(), since = Date.now() - RECENT_MS;
+      const recent = all.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX);
+      return json({ entries: all.slice(0, SHOW), recent });
+    }
     if (request.method === "POST") {
       let body; try { body = await request.json(); } catch { return json({ error: "bad json" }, 400); }
       const incoming = (Array.isArray(body && body.entries) ? body.entries : [body]).slice(0, MAX_POST).map(sanitize).filter(Boolean);
@@ -112,7 +117,8 @@ export class Board {
       for (const e of incoming) if (!byId.has(e.id)) { byId.set(e.id, e); added++; }
       const merged = [...byId.values()].sort(order).slice(0, KEEP);
       if (added) await this.state.storage.put("entries", merged);
-      return json({ entries: merged.slice(0, SHOW), added });
+      const since = Date.now() - RECENT_MS;
+      return json({ entries: merged.slice(0, SHOW), recent: merged.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX), added });
     }
     if (request.method === "DELETE") {
       const key = this.env.ADMIN_KEY;

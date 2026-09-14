@@ -84,6 +84,21 @@
   .tab:hover { color: var(--ink); }
   .tab.on { background: rgba(244, 87, 29, 0.22); border-color: rgba(244, 87, 29, 0.6); color: #ffd7c7; }
   .tab:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35); }
+  /* two-line rows: header (rank, title, score) + every team member as a chip, wrapping */
+  .boardcard { width: min(480px, 92vw); }
+  .board li { flex-direction: column; align-items: stretch; gap: 5px; }
+  .rowhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .board .who { white-space: normal; }
+  .members { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-size: 11.5px; color: #cfe6f3; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; }
+  .chip.me { color: #ffd7c7; border-color: rgba(244, 87, 29, 0.55); background: rgba(244, 87, 29, 0.14); }
+  .awards { display: flex; flex-direction: column; gap: 4px; }
+  .award { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12.5px;
+    background: rgba(244, 87, 29, 0.10); border: 1px solid rgba(244, 87, 29, 0.28); border-radius: 10px; padding: 6px 10px; }
+  .award .alabel { color: #ffd7c7; font-weight: 800; white-space: nowrap; }
+  .award .aval { text-align: right; min-width: 0; }
+  .award .aval b { color: var(--ink); }
+  .award .muted { color: var(--muted); }
 
   canvas { background: #0e3b52; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     width: min(96vw, calc(80vh * 3 / 2)); height: auto; aspect-ratio: 3 / 2; touch-action: none; }
@@ -124,6 +139,7 @@
       <h2>🏆 Topplista</h2>
       <span class="src" id="boardSrc">hämtar…</span>
     </div>
+    <div class="awards" id="awards"></div>
     <div class="tabs" id="boardTabs" role="tablist"></div>
     <ol class="board" id="board"><li class="empty">Hämtar topplistan…</li></ol>
   </div>
@@ -139,7 +155,7 @@
   import { loadGame, watchUpdates } from "./boot.js";
   // Always the latest build (see boot.js); the watcher reloads the menu
   // silently on a new build and shows a banner if a game is in progress.
-  const { createGame, fetchGlobalBoard, build } = await loadGame();
+  const { createGame, fetchGlobalBoardFull, build } = await loadGame();
 
   const nameEl = document.getElementById("name");
   const codeEl = document.getElementById("code");
@@ -149,28 +165,30 @@
   const canvas = document.getElementById("game");
 
   // Global leaderboard, refreshed while the menu is open. One shared list of
-  // finished games (solo and hosted); the tabs are different views of it.
-  const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc"), tabsEl = document.getElementById("boardTabs");
+  // finished games (solo and hosted); the tabs are different views of it, and
+  // the awards use every game from the last week.
+  const boardEl = document.getElementById("board"), boardSrc = document.getElementById("boardSrc"), tabsEl = document.getElementById("boardTabs"), awardsEl = document.getElementById("awards");
   const TABS = [["lag", "Lag"], ["solo", "Solo"], ["spelare", "Spelare"], ["raddade", "Räddade"], ["kombo", "Kombo"], ["speltid", "Speltid"]];
   let tab = "lag"; try { tab = localStorage.getItem("livboj-board-tab") || "lag"; } catch {}
   if (!TABS.some(([k]) => k === tab)) tab = "lag";
-  let entries = null;
+  let entries = null, recent = [];
   const fmtDate = (ts) => { const d = new Date(ts); return `${d.getDate()}/${d.getMonth() + 1}`; };
   const fmtDur = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   const teamOf = (e) => e.team || (e.n === 1 ? "Solo" : "Lag");
-  // Rows from before individual crediting worked have a total but all-zero players: names only, no "0p".
-  const names = (e) => { const ps = e.players || []; const noSplit = ps.every((pp) => typeof pp === "string" || !pp.score); return ps.map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", "); };
+  const noSplit = (e) => (e.players || []).every((pp) => typeof pp === "string" || !pp.score); // rows from before individual points worked
+  const members = (e) => (e.players || []).map((pp) => typeof pp === "string" ? { name: pp } : (noSplit(e) ? { name: pp.name } : { name: pp.name, score: pp.score }));
   const byTs = (a, b) => b.ts - a.ts;
   function rowsFor(key, list) {
     const P = () => list.flatMap((e) => (e.players || []).filter((p) => typeof p !== "string").map((p) => ({ ...p, e })));
+    const meta = (e) => `Nivå ${e.level} · ${fmtDate(e.ts)}`;
     switch (key) {
-      case "spelare": return P().filter((p) => p.score > 0).sort((a, b) => b.score - a.score || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.score} p` }));
-      case "raddade": return P().filter((p) => p.rescues > 0).sort((a, b) => b.rescues - a.rescues || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ who: [p.name, ` — ${teamOf(p.e)} · Nivå ${p.e.level} · ${fmtDate(p.e.ts)}`], sc: `${p.rescues} räddade` }));
-      case "kombo": return list.filter((e) => e.combo > 0).sort((a, b) => b.combo - a.combo || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · ${fmtDate(e.ts)}`], sc: `${e.combo} i rad` }));
-      case "speltid": return list.filter((e) => e.duration > 0).sort((a, b) => b.duration - a.duration || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: fmtDur(e.duration) }));
+      case "spelare": return P().filter((p) => p.score > 0).sort((a, b) => b.score - a.score || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ title: p.name, sub: `${teamOf(p.e)} · ${meta(p.e)}`, sc: `${p.score} p`, e: p.e, hi: p.name }));
+      case "raddade": return P().filter((p) => p.rescues > 0).sort((a, b) => b.rescues - a.rescues || byTs(a.e, b.e)).slice(0, 10).map((p) => ({ title: p.name, sub: `${teamOf(p.e)} · ${meta(p.e)}`, sc: `${p.rescues} räddade`, e: p.e, hi: p.name }));
+      case "kombo": return list.filter((e) => e.combo > 0).sort((a, b) => b.combo - a.combo || byTs(a, b)).slice(0, 10).map((e) => ({ title: teamOf(e), sub: meta(e), sc: `${e.combo} i rad`, e }));
+      case "speltid": return list.filter((e) => e.duration > 0).sort((a, b) => b.duration - a.duration || byTs(a, b)).slice(0, 10).map((e) => ({ title: teamOf(e), sub: meta(e), sc: fmtDur(e.duration), e }));
       // Lag = games with 2+ players; Solo = one-player games (a solo total is that player's score).
-      case "solo": return list.filter((e) => e.n === 1).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [(e.players[0] && e.players[0].name) || "Spelare", ` · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
-      default: return list.filter((e) => e.n >= 2).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ who: [teamOf(e), ` — ${names(e)} · Nivå ${e.level} · ${fmtDate(e.ts)}`], sc: `${e.score} p` }));
+      case "solo": return list.filter((e) => e.n === 1).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ title: (e.players[0] && e.players[0].name) || "Spelare", sub: meta(e), sc: `${e.score} p`, e, solo: true }));
+      default: return list.filter((e) => e.n >= 2).sort((a, b) => b.score - a.score || byTs(a, b)).slice(0, 10).map((e) => ({ title: teamOf(e), sub: `${e.n} spelare · ${meta(e)}`, sc: `${e.score} p`, e }));
     }
   }
   function renderTabs() {
@@ -189,18 +207,46 @@
     if (!rows.length) { boardEl.innerHTML = `<li class="empty">${entries.length ? (tab === "lag" ? "Inga lagspel än — skapa ett eget spel!" : "Inga resultat i den här listan än") : "Inga resultat än — bli först!"}</li>`; return; }
     rows.forEach((r, i) => {
       const li = document.createElement("li"); if (i === 0) li.className = "top1";
+      const head = document.createElement("div"); head.className = "rowhead";
       const who = document.createElement("span"); who.className = "who";
-      const b = document.createElement("b"); b.textContent = r.who[0];
-      who.append(document.createTextNode(`${i + 1}. `), b, document.createTextNode(r.who[1])); who.title = who.textContent;
+      const b = document.createElement("b"); b.textContent = r.title;
+      who.append(document.createTextNode(`${i + 1}. `), b, document.createTextNode(` · ${r.sub}`));
       const sc = document.createElement("span"); sc.className = "sc"; sc.textContent = r.sc;
-      li.append(who, sc); boardEl.appendChild(li);
+      head.append(who, sc); li.appendChild(head);
+      if (!r.solo) { // every member of the team, wrapping onto as many lines as needed
+        const mem = document.createElement("div"); mem.className = "members";
+        for (const m of members(r.e)) { const chip = document.createElement("span"); chip.className = "chip" + (r.hi === m.name ? " me" : ""); chip.textContent = m.score != null ? `${m.name} ${m.score}p` : m.name; mem.appendChild(chip); }
+        li.appendChild(mem);
+      }
+      boardEl.appendChild(li);
     });
+  }
+  // Player of the day / week: most individual points across all games in the period (ties: rescues).
+  function renderAwards() {
+    awardsEl.innerHTML = "";
+    const now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(), startWeek = now.getTime() - 7 * 24 * 3600 * 1000;
+    const best = (since) => {
+      const agg = new Map();
+      for (const e of recent) {
+        if (e.ts < since) continue;
+        for (const p of e.players || []) { if (typeof p === "string" || !(p.score > 0)) continue; const a = agg.get(p.name) || { name: p.name, score: 0, rescues: 0, games: 0 }; a.score += p.score; a.rescues += p.rescues || 0; a.games++; agg.set(p.name, a); }
+      }
+      return [...agg.values()].sort((a, b) => b.score - a.score || b.rescues - a.rescues)[0] || null;
+    };
+    for (const [icon, label, a, empty] of [["⭐", "Dagens spelare", best(startToday), "ingen har spelat idag än"], ["🏅", "Veckans spelare", best(startWeek), "inga spel den här veckan"]]) {
+      const row = document.createElement("div"); row.className = "award";
+      const l = document.createElement("span"); l.className = "alabel"; l.textContent = `${icon} ${label}`;
+      const v = document.createElement("span"); v.className = "aval";
+      if (a) { const b = document.createElement("b"); b.textContent = a.name; v.append(b, document.createTextNode(` · ${a.score} p · ${a.rescues} räddade · ${a.games} spel`)); }
+      else { v.textContent = empty; v.classList.add("muted"); }
+      row.append(l, v); awardsEl.appendChild(row);
+    }
   }
   async function refreshBoard() {
     if (cards.hidden) return;
-    const list = fetchGlobalBoard ? await fetchGlobalBoard() : null;
-    if (!list) { boardSrc.textContent = "nås inte just nu"; if (!entries) boardEl.innerHTML = '<li class="empty">Topplistan nås inte just nu</li>'; return; }
-    boardSrc.textContent = "global · alla spel"; entries = list; renderBoard();
+    const d = fetchGlobalBoardFull ? await fetchGlobalBoardFull() : null;
+    if (!d) { boardSrc.textContent = "nås inte just nu"; if (!entries) boardEl.innerHTML = '<li class="empty">Topplistan nås inte just nu</li>'; return; }
+    boardSrc.textContent = "global · alla spel"; entries = d.entries; recent = d.recent || []; renderAwards(); renderBoard();
   }
   renderTabs(); refreshBoard(); setInterval(refreshBoard, 60 * 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshBoard(); });

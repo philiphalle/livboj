@@ -196,10 +196,12 @@ function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-lead
 function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b.slice(0, 50))); } catch {} }
 function withEntryId(e) { return e.id ? e : { ...e, id: `${e.ts}-${e.score}-${e.level}-${(e.players || []).map((p) => (typeof p === "string" ? p : p.name)).join("+")}`.slice(0, 48) }; }
 const sortBoard = (b) => b.sort((a, c) => c.score - a.score || c.ts - a.ts);
-export async function fetchGlobalBoard() {
+// { entries: top list, recent: every result from the last week } — or null when the relay can't be reached
+export async function fetchGlobalBoardFull() {
   if (!RELAY_HTTP) return null;
-  try { const r = await fetch(`${RELAY_HTTP}/board`, { cache: "no-store" }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
+  try { const r = await fetch(`${RELAY_HTTP}/board`, { cache: "no-store" }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? { entries: d.entries, recent: Array.isArray(d.recent) ? d.recent : [] } : null; } catch { return null; }
 }
+export async function fetchGlobalBoard() { const d = await fetchGlobalBoardFull(); return d ? d.entries : null; }
 async function postGlobalBoard(entries) {
   if (!RELAY_HTTP || !entries.length) return null;
   try { const r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries }) }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
