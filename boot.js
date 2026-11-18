@@ -1,10 +1,13 @@
 // boot.js — versioned loader + update watcher for Livbojen.
 //
 // GitHub Pages serves every file with "cache for 10 minutes", so a normal
-// reload can keep an old game.js. We ask the server for game.js's current
-// fingerprint (its ETag) with caching disabled and import game.js?v=<etag>:
-// every build has its own URL, so a page load always runs the latest code
-// without anyone maintaining a version number.
+// reload can keep old code. We ask the server for the current fingerprint
+// (ETag) of EVERY module file the game loads, with caching disabled, combine
+// them into one build id and import game.js?v=<build>; game.js imports its
+// siblings with the same ?v=. So every build has its own URLs for all its
+// modules, a page load always runs the latest code, and a page can never mix
+// an old sim.js with a new game.js (in multiplayer: players on different
+// rules) — without anyone maintaining a version number.
 //
 // The same check repeats while the tab is open. A new build reloads the page
 // silently if nothing is going on yet (menu / setup screen); otherwise a small
@@ -12,13 +15,31 @@
 // the round for everyone.
 
 const CHECK_MS = 60 * 1000;
+// Every module file the game loads (game.js imports the others with its own
+// ?v=). A new module file must be added here, or a change to it alone would
+// not change the build.
+export const MODULES = ["game.js", "sim.js", "render.js", "net.js"];
 
+async function etagOf(file) {
+  const r = await fetch(`${file}?_=${Date.now()}`, { method: "HEAD", cache: "no-store" });
+  if (!r.ok) return "";
+  const tag = r.headers.get("etag") || r.headers.get("last-modified") || "";
+  return tag.replace(/^W\//, "").replace(/"/g, "").trim();
+}
+// A short, stable id for the list of fingerprints (cyrb53: plain JS, works on http:// too).
+function hash(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+// -> the build id, or "" when any fingerprint is missing (then: unversioned, no update watching)
 export async function currentBuild() {
   try {
-    const r = await fetch(`game.js?_=${Date.now()}`, { method: "HEAD", cache: "no-store" });
-    if (!r.ok) return "";
-    const tag = r.headers.get("etag") || r.headers.get("last-modified") || "";
-    return tag.replace(/^W\//, "").replace(/"/g, "").trim();
+    const tags = await Promise.all(MODULES.map(etagOf));
+    if (tags.some((t) => !t)) return "";
+    return hash(tags.join("|"));
   } catch {
     return "";
   }

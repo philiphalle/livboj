@@ -1,163 +1,23 @@
-// Livbojen — shared engine: solo / host / join.
-// Host-authoritative co-op over WebRTC P2P (Trystero, Nostr signaling), with
-// STUN+TURN for NAT traversal and host migration if the host leaves.
-// Three signaling strategies (all public, no account). The game probes which
-// one this network can actually reach and joins through that — corporate
-// networks often block one set of hosts but not another.
-import * as NOSTR from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/nostr/+esm";
-import * as MQTT from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/mqtt/+esm";
-import * as TORRENT from "https://cdn.jsdelivr.net/npm/trystero@0.21.5/torrent/+esm";
-let selfId = NOSTR.selfId; // re-pointed to the chosen strategy's id before any use
-const SIGNAL = { name: "nostr", mod: NOSTR };
-const getRelaySockets = () => (SIGNAL.mod && typeof SIGNAL.mod.getRelaySockets === "function" ? SIGNAL.mod.getRelaySockets() : {});
-function pickSignaling(timeoutMs = 4500) {
-  const cands = [
-    // Probe every relay of a strategy (any one opening is enough): the list's
-    // first few Nostr relays are often dead while later ones are fine.
-    { name: "nostr", mod: NOSTR, urls: NOSTR.defaultRelayUrls || [] },
-    { name: "mqtt", mod: MQTT, urls: MQTT.defaultRelayUrls || ["wss://broker.hivemq.com:8884/mqtt", "wss://broker.emqx.io:8084/mqtt"] },
-    { name: "torrent", mod: TORRENT, urls: TORRENT.defaultTrackerUrls || TORRENT.defaultRelayUrls || ["wss://tracker.openwebtorrent.com", "wss://tracker.webtorrent.dev"] },
-  ];
-  // Sequential, Nostr-first: only fall back when the preferred strategy's
-  // signaling can't be reached. (A pure race picked whichever broker answered
-  // first, which split peers across strategies.) `forced` skips the probe.
-  const forced = cands.find((c) => c.name === arguments[1]);
-  if (forced) return Promise.resolve(forced);
-  const probe = (urls, ms) => new Promise((resolve) => {
-    let done = false, pending = urls.length; const socks = [];
-    const finish = (ok) => { if (done) return; done = true; for (const s of socks) { try { s.close(); } catch {} } resolve(ok); };
-    if (!pending) return finish(false);
-    for (const u of urls) { try { const s = new WebSocket(u); socks.push(s); s.onopen = () => finish(true); s.onerror = () => { if (--pending <= 0) finish(false); }; } catch { if (--pending <= 0) finish(false); } }
-    setTimeout(() => finish(false), ms);
-  });
-  return (async () => { for (const c of cands) { if (await probe(c.urls, timeoutMs)) return c; } return cands[0]; })();
-}
-
-const APP_ID = "livboj-bookbeat-9f3a";
-const MAX_PLAYERS = 12;
-const SHORE_H = 70; // beach band along the bottom; rescued swimmers gather here
-const EAT_DWELL = 1.25; // seconds a monster must hold a swimmer before eating it
-const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
-
-// STUN + a public best-effort TURN relay so most NATs can connect without setup.
-// Optional WebSocket relay (see relay/README.md), for networks that block
-// peer-to-peer/WebRTC — most offices. Set it here, or per session via
-// ?relay=wss://… (the host's invite link carries it along to joiners).
-// Default transport: the WebSocket relay (works on office networks that block
-// WebRTC). ?relay=wss://… overrides it; ?relay=off forces plain P2P.
-const RELAY_DEFAULT = "wss://livboj-relay.livboj.workers.dev";
-const RELAY_URL = (() => {
-  try {
-    const q = new URLSearchParams(location.search).get("relay");
-    if (q === null || q === "") return RELAY_DEFAULT;
-    return /^(off|p2p|0|none)$/i.test(q) ? "" : q;
-  } catch { return RELAY_DEFAULT; }
-})();
-// Optional forced signaling strategy (?sig=nostr|mqtt|torrent). The host's
-// invite link carries its resolved choice so joiners land on the same one.
-const SIG_PARAM = (() => { try { return new URLSearchParams(location.search).get("sig") || ""; } catch { return ""; } })();
-
-const RTC = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun.relay.metered.ca:80" },
-    { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  ],
-};
-
-const BASE_LEVELS = [
-  // allowedMisses scales with the quota (~20%) so late levels stay fair.
-  { quota: 8,  spawn: 1300, speed: 22, sink: 10.0, maxOnScreen: 5,  allowedMisses: 6 }, // longer intro level: get the feel
-  { quota: 10, spawn: 1100, speed: 32, sink: 9.0,  maxOnScreen: 5,  allowedMisses: 6 }, // first Nessie shows up here
-  { quota: 12, spawn: 950,  speed: 44, sink: 8.5,  maxOnScreen: 6,  allowedMisses: 5 },
-  { quota: 16, spawn: 820,  speed: 56, sink: 8.0,  maxOnScreen: 7,  allowedMisses: 6 },
-  { quota: 20, spawn: 700,  speed: 68, sink: 7.5,  maxOnScreen: 8,  allowedMisses: 6 },
-  { quota: 26, spawn: 620,  speed: 78, sink: 7.0,  maxOnScreen: 9,  allowedMisses: 6 },
-  { quota: 32, spawn: 540,  speed: 88, sink: 6.5,  maxOnScreen: 10, allowedMisses: 7 },
-  { quota: 40, spawn: 470,  speed: 98, sink: 6.0,  maxOnScreen: 11, allowedMisses: 8 },
-];
-const SKINS = ["#f7d3ad", "#e8b98f", "#c98d61", "#a86a44", "#f2c39b"];
-const HAIRS = ["#3a2a1c", "#221b16", "#6b4a2a", "#0f0f10", "#8a5a2b", "#c9a24a"];
-const SUITS = ["#e5484d", "#3aa0ff", "#ffb020", "#8b5cf6", "#22c55e", "#ec4899"];
-const GULLS = [{ y: 46, sp: 26, x0: 0, ph: 0 }, { y: 82, sp: 34, x0: 220, ph: 1.4 }, { y: 62, sp: 20, x0: 440, ph: 2.7 }];
-const HUES = [28, 205, 140, 320, 52, 265, 0, 175, 95, 235, 300, 185];
-
-function worldSize(n) { return { w: Math.min(900 + (n - 1) * 170, 1560), h: Math.min(600 + (n - 1) * 120, 1040) }; }
-function levelParams(idx, n) {
-  const L = BASE_LEVELS[idx];
-  return {
-    quota: L.quota + (n - 1) * Math.ceil(L.quota * 0.5),
-    spawn: L.spawn / (1 + (n - 1) * 0.35),
-    speed: L.speed * (1 + (n - 1) * 0.05),
-    sink: L.sink,
-    maxOnScreen: L.maxOnScreen + (n - 1) * 2,
-    allowedMisses: L.allowedMisses + (n - 1),
-  };
-}
-// Lighten/darken a #rrggbb colour to an "rgb(...)" string for shading.
-function shadeHex(hex, f) {
-  const n = parseInt(hex.slice(1), 16), c = (v) => Math.max(0, Math.min(255, Math.round(v * f)));
-  return `rgb(${c((n >> 16) & 255)},${c((n >> 8) & 255)},${c(n & 255)})`;
-}
-const shade = (c) => shadeHex(c, 0.72);
-const tint = (c) => shadeHex(c, 1.2);
-const hi = (c) => shadeHex(c, 1.34);
-function makeObstacles(idx, w, h) {
-  const specs = [
-    [], // 1 — open water
-    [{ x: 130, y: 150, w: 230, h: 34 }], // 2
-    [{ x: 90, y: 140, w: 320, h: 34 }, { x: 620, y: 290, w: 40, h: 230 }], // 3
-    [{ x: 80, y: 120, w: 300, h: 34 }, { x: 560, y: 150, w: 40, h: 290 }, { x: 300, y: 440, w: 340, h: 36 }], // 4
-    [{ x: 70, y: 110, w: 280, h: 32 }, { x: 660, y: 120, w: 40, h: 270 }, { x: 120, y: 445, w: 320, h: 34 }, { x: 560, y: 370, w: 40, h: 170 }], // 5
-    [{ x: 60, y: 100, w: 380, h: 32 }, { x: 660, y: 110, w: 40, h: 300 }, { x: 120, y: 300, w: 40, h: 220 }, { x: 300, y: 450, w: 360, h: 34 }], // 6
-    [{ x: 80, y: 110, w: 320, h: 32 }, { x: 500, y: 110, w: 320, h: 32 }, { x: 80, y: 300, w: 40, h: 240 }, { x: 410, y: 270, w: 40, h: 270 }, { x: 200, y: 470, w: 440, h: 32 }], // 7
-    [{ x: 60, y: 100, w: 420, h: 30 }, { x: 560, y: 100, w: 300, h: 30 }, { x: 80, y: 250, w: 40, h: 300 }, { x: 300, y: 230, w: 40, h: 320 }, { x: 520, y: 300, w: 40, h: 260 }, { x: 160, y: 480, w: 520, h: 30 }], // 8 — dense maze
-  ];
-  const sx = w / 900, sy = h / 600;
-  return (specs[idx] || []).map((o) => ({ x: o.x * sx, y: o.y * sy, w: o.w * sx, h: o.h * sy }));
-}
-// Swamp zones (level 4+): murky patches where the livboj moves slowly.
-// Docks may run through them; monsters and swimmers are unaffected.
-function makeSwamps(idx, w, h) {
-  const specs = [
-    [], [], [],
-    [{ x: 60, y: 300, w: 260, h: 180 }], // 4
-    [{ x: 560, y: 60, w: 300, h: 200 }], // 5
-    [{ x: 40, y: 60, w: 280, h: 200 }, { x: 600, y: 320, w: 260, h: 180 }], // 6
-    [{ x: 520, y: 40, w: 340, h: 190 }, { x: 40, y: 340, w: 300, h: 170 }], // 7
-    [{ x: 40, y: 40, w: 300, h: 180 }, { x: 580, y: 200, w: 280, h: 190 }, { x: 220, y: 330, w: 200, h: 170 }], // 8
-  ];
-  const sx = w / 900, sy = h / 600;
-  return (specs[idx] || []).map((z) => ({ x: z.x * sx, y: z.y * sy, w: z.w * sx, h: z.h * sy }));
-}
-// Whirlpools (levels 6 and 7): slowly draw swimmers toward the centre; one that
-// reaches the core is lost (counts as a miss). The livboj feels a weaker pull.
-function makeWhirls(idx, w, h) {
-  const specs = [[], [], [], [], [], [{ x: 530, y: 240, r: 90 }], [{ x: 660, y: 360, r: 100 }], []]; // clear of docks, swamps and the spawn ring
-  const sx = w / 900, sy = h / 600;
-  return (specs[idx] || []).map((z) => ({ x: z.x * sx, y: z.y * sy, r: z.r * Math.min(sx, sy) }));
-}
-const WHIRL_PULL = 30, WHIRL_SPIN = 55, WHIRL_PLAYER = 0.35, WHIRL_CORE = 0.16;
-const SWAMP_SLOW = 0.55;
-const inRect = (x, y, z) => x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h;
-// Swamps are drawn as blobs (an ellipse inscribed in the zone), so the slow zone is that ellipse too.
-const inSwamp = (x, y, z) => { const nx = (x - z.x - z.w / 2) / (z.w / 2), ny = (y - z.y - z.h / 2) / (z.h / 2); return nx * nx + ny * ny <= 1.08; };
-function circleHitsRect(px, py, pr, o) {
-  const cx = Math.max(o.x, Math.min(px, o.x + o.w));
-  const cy = Math.max(o.y, Math.min(py, o.y + o.h));
-  const dx = px - cx, dy = py - cy;
-  if (dx * dx + dy * dy >= pr * pr) return null;
-  const d = Math.hypot(dx, dy);
-  if (d > 0.0001) return { x: px + (dx / d) * (pr - d), y: py + (dy / d) * (pr - d), nx: dx / d, ny: dy / d };
-  const l = px - o.x, r = o.x + o.w - px, t = py - o.y, b = o.y + o.h - py;
-  const m = Math.min(l, r, t, b);
-  if (m === l) return { x: o.x - pr, y: py, nx: -1, ny: 0 };
-  if (m === r) return { x: o.x + o.w + pr, y: py, nx: 1, ny: 0 };
-  if (m === t) return { x: px, y: o.y - pr, nx: 0, ny: -1 };
-  return { x: px, y: o.y + o.h + pr, nx: 0, ny: 1 };
-}
+// Livbojen — the game: one createGame() per canvas (solo / host / join) that
+// wires the simulation (sim.js), the renderer (render.js) and the network
+// (net.js) together, plus sound and the page chrome (fullscreen, rotate card,
+// iOS fixes). Solo and the host run the sim; a joiner draws the host's state.
+//
+// Cache busting (see boot.js): boot.js imports game.js?v=<build>, where the
+// build fingerprint covers every module file. The siblings are imported here
+// with that same ?v= (empty in node or when unversioned), so a changed sim.js
+// gets a new URL too and every module is loaded under exactly one URL. Never
+// `import … from "./sim.js"` statically: that is a second, uncached copy.
+// A new module file also goes into MODULES in boot.js.
+const V = new URL(import.meta.url).search;
+const [sim, net, { createRenderer }] = await Promise.all([import(`./sim.js${V}`), import(`./net.js${V}`), import(`./render.js${V}`)]);
+const { Phase, BASE_LEVELS, SHORE_H, EAT_DWELL, shoreY, levelParams, inSwamp, circleHitsRect, whirlPull, SWAMP_SLOW, WHIRL_PLAYER, createSim } = sim;
+const { RELAY_URL, SIG_PARAM, RTC, APP_ID, SIGNAL, getRelaySockets, pickSignaling, relayJoin, runIceProbe,
+  loadBoard, saveBoardLS, withEntryId, sortBoard, postGlobalBoard, queueResult, flushBoardQueue } = net;
+// what boot.js hands the pages (besides createGame and initChrome)
+export const { fetchGlobalBoard, fetchGlobalBoardFull, postForslag } = net;
+let selfId = net.initialSelfId; // re-pointed to the chosen strategy's id before any use
+const BOARD_SHOW = 10;
 
 // ---- Sound (WebAudio, synthesized — no assets) ---------------------------
 let audioCtx = null;
@@ -191,83 +51,11 @@ const sTick = () => { beep(900, 0.05, "square", 0.045, 0); };
 const sJoin = () => { unlockAudio(); beep(600, 0.08, "sine", 0.05, 0); beep(900, 0.09, "sine", 0.05, 0.08); };
 const sChomp = () => { beep(95, 0.22, "sawtooth", 0.06, 0); beep(60, 0.2, "sawtooth", 0.05, 0.1); };
 const sStun = () => { unlockAudio(); beep(300, 0.1, "square", 0.05, 0); beep(230, 0.1, "square", 0.05, 0.09); beep(180, 0.13, "square", 0.045, 0.18); };
-
-// Loch Ness monsters hunt swimmers (never the livboj): one from level 2,
-// two on level 4, three from level 5.
-function monstersForLevel(idx) { return idx >= 1 ? Math.min(Math.max(1, idx - 1), 3) : 0; }
-
-// ---- Leaderboard ----------------------------------------------------------
-// Global list on the relay (GET/POST /board), with the host's localStorage as
-// cache and offline fallback. Entries carry a stable id so re-posting (e.g.
-// the one-time upload of an old local list) never duplicates.
-const RELAY_HTTP = RELAY_URL ? RELAY_URL.replace(/^ws(s?):\/\//, "http$1://").replace(/\/$/, "") : "";
-const BOARD_SHOW = 10;
-function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-leaderboard") || "[]").map(withEntryId); } catch { return []; } }
-function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b.slice(0, 50))); } catch {} }
-function withEntryId(e) { return e.id ? e : { ...e, id: `${e.ts}-${e.score}-${e.level}-${(e.players || []).map((p) => (typeof p === "string" ? p : p.name)).join("+")}`.slice(0, 48) }; }
-const sortBoard = (b) => b.sort((a, c) => c.score - a.score || c.ts - a.ts);
-// { entries: top list, recent: every result from the last week } — or null when the relay can't be reached
-export async function fetchGlobalBoardFull() {
-  if (!RELAY_HTTP) return null;
-  try { const r = await fetch(`${RELAY_HTTP}/board`, { cache: "no-store" }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? { entries: d.entries, recent: Array.isArray(d.recent) ? d.recent : [] } : null; } catch { return null; }
-}
-export async function fetchGlobalBoard() { const d = await fetchGlobalBoardFull(); return d ? d.entries : null; }
-async function postGlobalBoard(entries) {
-  if (!RELAY_HTTP || !entries.length) return null;
-  try { const r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries }) }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
-}
-// Outbox for finished games: a result goes into localStorage first and leaves
-// it only once the relay has taken it (or refused it with a 4xx), so a result
-// survives a dead network, a closed tab or a crash. Flushed when a game ends,
-// on every page load and when the browser comes back online. The relay dedupes
-// by entry id, so a re-sent entry can never appear twice.
-const QUEUE_KEY = "livboj-board-queue";
-const loadQueue = () => { try { const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); return Array.isArray(q) ? q : []; } catch { return []; } };
-const saveQueue = (q) => { try { if (q.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(q.slice(-100))); else localStorage.removeItem(QUEUE_KEY); } catch {} };
-function queueResult(entry) { if (!RELAY_HTTP) return; const q = loadQueue(); if (!q.some((e) => e.id === entry.id)) { q.push(entry); saveQueue(q); } }
-let flushing = null;
-// -> the merged global list after a successful post, else null (the queue keeps what was not taken)
-function flushBoardQueue() {
-  if (!RELAY_HTTP) return Promise.resolve(null);
-  if (flushing) return flushing.then((m) => (loadQueue().length ? flushBoardQueue() : m)); // a result queued mid-flight goes next
-  const batch = loadQueue().slice(0, 50);
-  if (!batch.length) return Promise.resolve(null);
-  flushing = (async () => {
-    for (let k = 0; k < 2; k++) {
-      if (k) await new Promise((r) => setTimeout(r, 2000)); // one retry, shortly after
-      let r;
-      try { r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries: batch }), keepalive: true }); } catch { continue; } // offline: retry once
-      const sent = new Set(batch.map((e) => e.id));
-      if (r.status >= 400 && r.status < 500) { saveQueue(loadQueue().filter((e) => !sent.has(e.id))); return null; } // refused: drop, no retry loop
-      if (!r.ok) continue;
-      saveQueue(loadQueue().filter((e) => !sent.has(e.id)));
-      try { const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
-    }
-    return null;
-  })().finally(() => { flushing = null; });
-  return flushing;
-}
-// Förslagslåda: one suggestion to the relay (POST /forslag). -> "ok" | "slow" (throttled) | "error"
-// (any other answer, e.g. a 404 from a relay without the endpoint, is "error": the page keeps the text)
-export async function postForslag(text, name) {
-  if (!RELAY_HTTP) return "error";
-  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 8000);
-  try {
-    const r = await fetch(`${RELAY_HTTP}/forslag`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: String(text || "").slice(0, 500), name: String(name || "").slice(0, 14) }), signal: ctl.signal });
-    if (r.status === 429) return "slow";
-    if (!r.ok) return "error";
-    const d = await r.json().catch(() => null);
-    return d && d.ok ? "ok" : "error";
-  } catch { return "error"; } finally { clearTimeout(t); }
-}
-// whatever an earlier page load could not deliver
-flushBoardQueue();
-addEventListener("online", () => { flushBoardQueue(); });
+const SOUNDS = { start: sStart, dash: sDash, stun: sStun, miss: sMiss, rescue: sRescue, clear: sClear, over: sOver, win: sWin, chomp: sChomp }; // sim.js hooks.sound(name)
 
 // ---- Page chrome (index.html and host.html) --------------------------------
 // Fullscreen button + F key, the "Vrid mobilen" card, the add-to-home-screen
-// hint, gesture blocking on the game, and the iOS scroll-offset fix. Lives here
-// (not in its own module) because game.js is the one file boot.js cache-busts.
+// hint, gesture blocking on the game, and the iOS scroll-offset fix.
 const UA = navigator.userAgent || "";
 const IS_IOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 // in-app browsers (Messenger, Instagram, Snapchat, TikTok, the Google app…) can't add to the home screen
@@ -401,78 +189,45 @@ export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
   };
 }
 
-// ---- Water texture ---------------------------------------------------------
-// A seamless value-noise tile of soft light filaments, scrolled in two layers
-// to fake sunlight refracted through the surface (the classic caustics trick).
-let CAUSTIC = null;
-function causticTile() {
-  if (CAUSTIC) return CAUSTIC;
-  const S = 256, P = 8; // pixels, base lattice period (divides S -> seamless)
-  let seed = 1234567;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-  const lat = [];
-  for (let k = 0; k < 3; k++) { const per = P << k; const g = new Float32Array(per * per); for (let i = 0; i < g.length; i++) g[i] = rnd(); lat.push({ per, g }); }
-  const smooth = (t) => t * t * (3 - 2 * t);
-  const sample = (L, u, v) => {
-    const x0 = Math.floor(u), y0 = Math.floor(v), fx = smooth(u - x0), fy = smooth(v - y0), per = L.per;
-    const at = (x, y) => L.g[((y % per + per) % per) * per + ((x % per + per) % per)];
-    const a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
-    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
-  };
-  const cv = document.createElement("canvas"); cv.width = cv.height = S;
-  const c2 = cv.getContext("2d"); const img = c2.createImageData(S, S); const px = img.data;
-  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    let n = 0, amp = 0.55, tot = 0;
-    for (let k = 0; k < 3; k++) { const L = lat[k]; n += sample(L, x / S * L.per, y / S * L.per) * amp; tot += amp; amp *= 0.5; }
-    n /= tot;
-    const ridge = 1 - Math.min(1, Math.abs(n - 0.5) * 5); // bright where the field crosses its middle -> a filament network
-    const a = Math.pow(ridge, 3);
-    const i = (y * S + x) * 4; px[i] = 225; px[i + 1] = 245; px[i + 2] = 255; px[i + 3] = Math.round(a * 255);
-  }
-  c2.putImageData(img, 0, 0);
-  CAUSTIC = cv; return cv;
-}
-
 // ==========================================================================
 export function createGame(canvas, opts) {
-  const ctx = canvas.getContext("2d");
   const CW = canvas.width, CH = canvas.height;
   const mode = opts.mode; // 'solo' | 'host' | 'join'
   const myName = (opts.name || "Spelare").slice(0, 14);
   const myTeam = (opts.team || "").trim().slice(0, 20); // optional, host only
   const cbs = opts.cbs || {};
-  const Phase = { LOBBY: "lobby", INTRO: "intro", PLAY: "play", CLEARED: "cleared", OVER: "over", WIN: "win" };
 
   let authoritative = mode !== "join"; // solo & host run the sim; join receives
   let promoted = false;
 
-  let world = worldSize(1);
-  let obstacles = [], swimmers = [], splashes = [];
-  let swamps = [];
-  let whirls = [];
-  let players = new Map();
-  let levelIndex = 0, score = 0, caught = 0, missed = 0, timeLeft = 0, spawnTimer = 0, introTimer = 0;
-  let phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;
-  let swimmerSeq = 1, hueSeq = 0;
+  const selfPos = { x: 0, y: 0, r: 30, dashActive: 0, dashCd: 0, seeded: false };
+  let saved = []; // rescued swimmers swimming to / cheering on the shore (cosmetic)
+  let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
+  // The authoritative state (world, players, swimmers, monsters, phase, score…)
+  // lives in the sim; its side effects come back through these hooks.
+  const S = createSim({
+    selfId: () => selfId, selfPos,
+    hooks: {
+      sound: (k) => SOUNDS[k](),
+      phase: () => emitPhase(),
+      push: () => pushState(),
+      result: () => recordResult(),
+      rescued: (s) => spawnSaved(s.x, s.y, s.sk, s.hr, s.id),
+      levelStarted: () => { saved = []; levelStartScore = new Map([...S.players.values()].map((p) => [p.id, p.score || 0])); },
+    },
+  });
+  S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;
   let hostId = authoritative ? selfId : null;
-  let fxOut = []; // rescue/miss events to broadcast this tick
-  let lastSec = 999, jLastSec = 999; // countdown-tick trackers
-  // Per-game stats for the leaderboard: time played, swimmers rescued, best rescue streak.
-  let gameStartAt = 0, totalCaught = 0, combo = 0, bestCombo = 0;
-  function beginGame() {
-    gameStartAt = performance.now(); totalCaught = 0; combo = 0; bestCombo = 0; levelIndex = 0; score = 0;
-    for (const p of players.values()) { p.rescues = 0; p.score = 0; }
-  }
+  let jLastSec = 999; // countdown-tick tracker (joiners)
+  // Per-game stats for the leaderboard: time played (the rest is in the sim).
+  let gameStartAt = 0;
+  function beginGame() { gameStartAt = performance.now(); S.beginGame(); }
   let board = loadBoard(); // leaderboard (global when the relay answers, else the local cache)
   let boardSource = "local"; // "global" once the relay has answered
   let netBoard = []; // leaderboard received from the host (joiners)
-  let monsters = [], monsterSeq = 1;
-  let saved = []; // rescued swimmers swimming to / cheering on the shore (cosmetic)
-  let lowFx = false; // level-of-detail: lighten shading when the water is crowded
 
   const keys = Object.create(null);
   let usingTouch = false, pointerTarget = null, dashTap = false;
-  const selfPos = { x: 0, y: 0, r: 30, dashActive: 0, dashCd: 0, seeded: false };
 
   const iSwim = new Map(), iPlayer = new Map(), iMonster = new Map();
   let jSplashes = [];
@@ -483,151 +238,26 @@ export function createGame(canvas, opts) {
   const A = { st: null, inp: null, hi: null };
   let broadcasting = false;
   let electing = false, electAt = 0;
-  const DASH_BTN = { x: CW - 66, y: CH - 66, r: 46 };
-  const MUTE_BTN = { x: 28, y: CH - 28, r: 16 };
-  const QUIT_BTN = { x: CW - 132, y: 44, w: 114, h: 24 }; // host-only "Avsluta spelet"
   let quitArmedUntil = 0; // two-tap confirm so nobody quits by accident
+
+  const R = createRenderer(canvas, {
+    myName, mode, selfPos, netSummary,
+    view: () => currentView(),
+    live: () => ({ authoritative, selfId, usingTouch, muted, quitArmedUntil, levelStartScore, saved }),
+  });
+  const { DASH_BTN, MUTE_BTN, QUIT_BTN } = R;
   // The host's "go on" prompt is a real button (mouse/touch) as well as Enter.
-  let ACTION_BTN = null;
-  function drawActionButton(label, cx, cy) {
-    ctx.font = "800 20px system-ui, sans-serif";
-    const w = Math.ceil(ctx.measureText(label).width) + 48, h = 44, x = cx - w / 2, y = cy - h / 2;
-    ACTION_BTN = { x, y, w, h };
-    ctx.save(); ctx.shadowColor = "rgba(244,87,29,0.45)"; ctx.shadowBlur = 18; ctx.fillStyle = "#f4571d";
-    ctx.beginPath(); ctx.roundRect(x, y, w, h, 14); ctx.fill(); ctx.restore();
-    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label, cx, cy + 1); ctx.textBaseline = "alphabetic";
-    ctx.font = "600 12px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(usingTouch ? "eller tryck var som helst" : "eller tryck Enter", cx, cy + h / 2 + 17);
-  }
-  function inAction(cx, cy) { const b = ACTION_BTN; return !!b && authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
+  function inAction(cx, cy) { const b = R.actionBtn(); return !!b && authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
   // "Till startsidan" on the end screen, for everyone. Leaves the room and goes to the menu.
-  let LEAVE_BTN = null;
-  function drawLeaveButton(cx, cy) {
-    ctx.font = "700 15px system-ui, sans-serif";
-    const label = "Till startsidan";
-    const w = Math.ceil(ctx.measureText(label).width) + 36, h = 36, x = cx - w / 2, y = cy - h / 2;
-    LEAVE_BTN = { x, y, w, h };
-    ctx.fillStyle = "rgba(255,255,255,0.12)"; ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.22)"; ctx.lineWidth = 1; ctx.stroke();
-    ctx.fillStyle = "#eaf6ff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label, cx, cy + 1); ctx.textBaseline = "alphabetic";
-  }
-  function inLeave(cx, cy) { const b = LEAVE_BTN; return !!b && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
+  function inLeave(cx, cy) { const b = R.leaveBtn(); return !!b && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
   function leaveToStart() { try { room && room.leave && room.leave(); } catch {} location.href = "index.html"; }
-  let levelStartScore = new Map(); // per-player score when the level began ("på väg upp")
 
   // ---- Setup --------------------------------------------------------------
-  function setupSolo() { addPlayer(selfId, myName); beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
-  // ---- Relay transport: same surface as a Trystero room (tuple actions,
-  // onPeerJoin/Leave, getPeers) but over one plain WebSocket to the relay.
-  //
-  // Reconnects with a short backoff, and also on purpose: when the page comes
-  // back after more than 5 s in the background (iOS keeps dead sockets "OPEN")
-  // and when the browser comes back online. The relay keeps one socket per
-  // connection, not per id, so a reconnect is seen by everyone else as a join
-  // (ignored: already known) and, whenever the old socket finally closes on the
-  // server, a leave for the same id. A leave therefore only counts after a
-  // short grace period, during which we ask the room whether that id is still
-  // here ("_who"); its answer ("_here") — or any message or join from it —
-  // cancels the leave. So a reconnect never drops a player from the roster and
-  // never starts a host election. ("_who"/"_here" are relay-transport only;
-  // older clients ignore unknown actions.)
-  function relayJoin(url, roomId) {
-    const BACKOFF = [400, 1000, 2000, 4000, 6000], KEEPALIVE_MS = 25000, LEAVE_GRACE_MS = 2500;
-    const handlers = new Map(); const peers = new Set(); const queue = []; const pendingLeave = new Map();
-    let joinCb = () => {}, leaveCb = () => {}, ws = null, open = false, closed = false, tries = 0, retry = 0, hiddenAt = 0, lastHere = 0;
-    const stats = { connects: 0, forced: 0 };
-    const addPeer = (id) => { if (!id || id === selfId) return; cancelLeave(id); if (!peers.has(id)) { peers.add(id); joinCb(id); } };
-    function cancelLeave(id) { const t = pendingLeave.get(id); if (t) { clearTimeout(t); pendingLeave.delete(id); } }
-    function deferLeave(id) {
-      if (!id || id === selfId || !peers.has(id) || pendingLeave.has(id)) return;
-      pendingLeave.set(id, setTimeout(() => { pendingLeave.delete(id); if (peers.delete(id)) leaveCb(id); }, LEAVE_GRACE_MS));
-      sendRaw({ t: "msg", a: "_who", d: { id } });
-    }
-    const sayHere = () => { const now = performance.now(); if (now - lastHere < 300) return; lastHere = now; sendRaw({ t: "msg", a: "_here", d: {} }); };
-    function drop() { const s = ws; ws = null; open = false; if (s) { s.onopen = s.onmessage = s.onclose = s.onerror = null; try { s.close(); } catch {} } }
-    function later() {
-      if (closed) return;
-      clearTimeout(retry);
-      const ms = BACKOFF[Math.min(tries++, BACKOFF.length - 1)];
-      retry = setTimeout(() => connect(false), document.hidden ? Math.max(ms, 3000) : ms);
-    }
-    function connect(force) {
-      if (closed) return;
-      clearTimeout(retry);
-      if (!force && ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-      if (force) stats.forced++;
-      drop(); // the old socket's handlers are detached first: its late onclose can't schedule another connect
-      let sock;
-      try { sock = new WebSocket(`${url.replace(/\/$/, "")}/room/${encodeURIComponent(roomId)}?id=${encodeURIComponent(selfId)}`); }
-      catch { later(); return; }
-      ws = sock; stats.connects++;
-      sock.onopen = () => { if (sock !== ws) return; open = true; for (const q of queue) sock.send(q); queue.length = 0; };
-      sock.onmessage = (e) => {
-        if (sock !== ws) return;
-        let m; try { m = JSON.parse(e.data); } catch { return; }
-        if (m.t === "welcome") {
-          tries = 0;
-          const here = new Set((m.peers || []).filter((id) => id !== selfId)); // (a stale socket of ours may still be listed)
-          for (const id of here) addPeer(id);
-          for (const id of [...peers]) if (!here.has(id)) deferLeave(id); // left while we were away (or a stale entry)
-          if (stats.connects > 1) { sayHere(); setTimeout(sayHere, 1200); } // cover our old socket's leave reaching the others late
-        } else if (m.t === "peer") {
-          if (m.id === selfId) return; // our own old socket coming or going
-          if (m.join) addPeer(m.id); else deferLeave(m.id);
-        } else if (m.t === "msg") {
-          if (!m.from || m.from === selfId) return;
-          addPeer(m.from); // anything from a peer proves it is here
-          if (m.a === "_who") { if (m.d && m.d.id === selfId) sayHere(); return; }
-          if (m.a === "_here") return;
-          const cb = handlers.get(m.a); if (cb) cb(m.d, m.from);
-        }
-      };
-      sock.onclose = () => { if (sock !== ws) return; ws = null; open = false; later(); };
-      sock.onerror = () => {}; // onclose follows
-    }
-    const onVisible = () => {
-      if (closed) return;
-      if (document.hidden) { hiddenAt = hiddenAt || performance.now(); return; }
-      const away = hiddenAt ? performance.now() - hiddenAt : 0; hiddenAt = 0;
-      if (away > 5000) connect(true); else if (!open) connect(false);
-    };
-    const onPageShow = (e) => { if (!closed && e.persisted) connect(true); }; // back from the bfcache
-    const onOnline = () => { if (!closed) connect(true); };
-    document.addEventListener("visibilitychange", onVisible);
-    addEventListener("pageshow", onPageShow);
-    addEventListener("online", onOnline);
-    const ka = setInterval(() => { if (open && ws) { try { ws.send('{"t":"ka"}'); } catch {} } }, KEEPALIVE_MS); // the relay ignores it; keeps NATs / radios from dropping an idle socket
-    connect(false);
-    function sendRaw(o) { const s = JSON.stringify(o); if (open && ws) { try { ws.send(s); } catch {} } else if (queue.length < 60) queue.push(s); }
-    return {
-      makeAction: (name) => [(d) => sendRaw({ t: "msg", a: name, d }), (cb) => handlers.set(name, cb)],
-      onPeerJoin: (cb) => { joinCb = cb; }, onPeerLeave: (cb) => { leaveCb = cb; },
-      getPeers: () => Object.fromEntries([...peers].map((p) => [p, true])),
-      isOpen: () => open,
-      reconnect: () => connect(true), stats: () => ({ ...stats, open, peers: [...peers], pendingLeaves: pendingLeave.size }),
-      leave: () => {
-        closed = true; clearTimeout(retry); clearInterval(ka);
-        for (const t of pendingLeave.values()) clearTimeout(t); pendingLeave.clear();
-        document.removeEventListener("visibilitychange", onVisible); removeEventListener("pageshow", onPageShow); removeEventListener("online", onOnline);
-        try { ws && ws.close(); } catch {}
-      },
-    };
-  }
+  function setupSolo() { addPlayer(selfId, myName); beginGame(); startLevel(0); S.phase = Phase.INTRO; S.introTimer = 2.4; emitPhase(); }
 
   // ---- Network diagnostics: signaling reachability + an ICE probe that tells
   // whether STUN/TURN work from this network (shown in the lobby).
   const iceProbe = { done: false, host: 0, srflx: 0, relay: 0 };
-  function runIceProbe() {
-    try {
-      const pc = new RTCPeerConnection(RTC); pc.createDataChannel("probe");
-      pc.onicecandidate = (e) => {
-        if (!e.candidate) { iceProbe.done = true; try { pc.close(); } catch {} return; }
-        const c = e.candidate.candidate || "";
-        if (/ typ host/.test(c)) iceProbe.host++; else if (/ typ srflx/.test(c)) iceProbe.srflx++; else if (/ typ relay/.test(c)) iceProbe.relay++;
-      };
-      pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => { iceProbe.done = true; });
-      setTimeout(() => { iceProbe.done = true; try { pc.close(); } catch {} }, 6000);
-    } catch { iceProbe.done = true; }
-  }
   function netStatus() {
     const peers = room && room.getPeers ? Object.keys(room.getPeers()).length : 0;
     if (RELAY_URL) return { transport: "relay", relayOpen: !!(room && room.isOpen && room.isOpen()), peers, ice: iceProbe };
@@ -647,16 +277,11 @@ export function createGame(canvas, opts) {
       : (n.ice.done && !n.ice.relay ? " — dyker ingen upp? kontorsnät kräver ofta reläservern (relay/README.md)" : ""));
     return `Nätverk: P2P via ${SIGNAL.name} · ${sig} · ${ice} · ${n.peers} medspelare${warn}`;
   }
-  function drawNetLine() {
-    if (mode === "solo") return;
-    ctx.save(); ctx.textAlign = "center"; ctx.font = "600 12px system-ui, sans-serif";
-    const s = netSummary(); ctx.fillStyle = /blockera|kan inte/.test(s) ? "#ff8a6a" : "#9fc4d6"; ctx.fillText(s, CW / 2, CH - 36); ctx.restore();
-  }
 
   function setupNet(asHost) {
     const go = (r) => { room = r; wireRoom(asHost); };
-    if (RELAY_URL) { go(relayJoin(RELAY_URL, opts.room)); return; }
-    runIceProbe();
+    if (RELAY_URL) { go(relayJoin(RELAY_URL, opts.room, selfId)); return; }
+    runIceProbe(iceProbe);
     pickSignaling(3500, SIG_PARAM).then((c) => {
       SIGNAL.name = c.name; SIGNAL.mod = c.mod; SIGNAL.resolved = true; if (c.mod.selfId) selfId = c.mod.selfId;
       go(c.mod.joinRoom({ appId: APP_ID, rtcConfig: RTC }, opts.room));
@@ -671,7 +296,7 @@ export function createGame(canvas, opts) {
       else if (sendHello) sendHello({ name: myName });
     });
     room.onPeerLeave((peer) => {
-      if (authoritative) { players.delete(peer); emitRoster(); }
+      if (authoritative) { S.players.delete(peer); emitRoster(); }
       else if (lastView && peer === lastView.hostId) electHost();
     });
     if (asHost) wireHost(); else wireJoin();
@@ -680,7 +305,7 @@ export function createGame(canvas, opts) {
   function wireHost() {
     addPlayer(selfId, myName);
     sendState = (snap) => { try { A.st[0](snap); } catch {} };
-    A.hi[1]((data, peer) => { if (!players.has(peer)) addPlayer(peer, (data && data.name) || "Spelare"); else renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
+    A.hi[1]((data, peer) => { if (!S.players.has(peer)) addPlayer(peer, (data && data.name) || "Spelare"); else renamePlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
     A.inp[1]((data, peer) => { applyPeerInput(peer, data); });
     emitRoster();
     startBroadcast();
@@ -696,28 +321,24 @@ export function createGame(canvas, opts) {
   }
   function startBroadcast() { if (broadcasting) return; broadcasting = true; setInterval(() => { if (authoritative && room) pushState(); }, 50); }
 
-  function addPlayer(id, name) {
-    if (players.has(id)) return;
-    if (players.size >= MAX_PLAYERS) return; // lobby full
-    players.set(id, { id, name, x: world.w / 2, y: world.h / 2, r: 30, hue: HUES[(hueSeq++) % HUES.length], dashActive: 0, dashCooldown: 0, rescues: 0, score: 0, input: { dx: 0, dy: 0, dash: false } });
-  }
-  function renamePlayer(id, name) { const p = players.get(id); if (p) p.name = (name || "Spelare").slice(0, 14); }
+  function addPlayer(id, name) { S.addPlayer(id, name); }
+  function renamePlayer(id, name) { S.renamePlayer(id, name); }
   // A peer owns its own position (co-op: trust the client so what it sees is real).
   function applyPeerInput(peer, data) {
-    let p = players.get(peer);
-    if (!p) { addPlayer(peer, "Spelare"); p = players.get(peer); emitRoster(); }
+    let p = S.players.get(peer);
+    if (!p) { addPlayer(peer, "Spelare"); p = S.players.get(peer); emitRoster(); }
     if (p && data && typeof data.x === "number") {
-      p.x = Math.max(p.r, Math.min(world.w - p.r, data.x));
-      p.y = Math.max(p.r, Math.min(world.h - p.r, data.y));
+      p.x = Math.max(p.r, Math.min(S.world.w - p.r, data.x));
+      p.y = Math.max(p.r, Math.min(S.world.h - p.r, data.y));
       p.dashActive = data.dash ? 0.18 : 0;
       p.stunned = !!data.stun;
     }
   }
-  function rosterList() { return [...players.values()].map((p) => ({ id: p.id, name: p.id === selfId ? myName : p.name, you: p.id === selfId })); }
+  function rosterList() { return [...S.players.values()].map((p) => ({ id: p.id, name: p.id === selfId ? myName : p.name, you: p.id === selfId })); }
   function emitBoard() { cbs.onBoard && cbs.onBoard(board, boardSource); }
   function adoptBoard(list, source) {
     board = sortBoard(list.map(withEntryId)); boardSource = source; saveBoardLS(board); emitBoard();
-    if (room && (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN)) pushState(); // joiners see it too
+    if (room && (S.phase === Phase.LOBBY || S.phase === Phase.OVER || S.phase === Phase.WIN)) pushState(); // joiners see it too
   }
   // Host: sync with the global list. The local cache is always posted (the
   // relay dedupes by id, so this is idempotent) — that uploads a pre-global
@@ -729,12 +350,12 @@ export function createGame(canvas, opts) {
     adoptBoard(merged, "global");
   }
   function recordResult() {
-    if (score <= 0) return; // nothing rescued: not a result worth listing
+    if (S.score <= 0) return; // nothing rescued: not a result worth listing
     const entry = withEntryId({
-      score, level: levelIndex + 1, won: phase === Phase.WIN, n: players.size, ts: Date.now(), team: myTeam,
-      duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: totalCaught, combo: bestCombo,
+      score: S.score, level: S.levelIndex + 1, won: S.phase === Phase.WIN, n: S.players.size, ts: Date.now(), team: myTeam,
+      duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: S.totalCaught, combo: S.bestCombo,
       // team total in `score`; per-player breakdown here, best first.
-      players: [...players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 })).sort((a, b) => b.score - a.score),
+      players: [...S.players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 })).sort((a, b) => b.score - a.score),
     });
     board.push(entry); sortBoard(board); board = board.slice(0, 50);
     saveBoardLS(board); emitBoard();
@@ -748,7 +369,7 @@ export function createGame(canvas, opts) {
   // cosmetic and spawned locally on every client (from the rescue event), so
   // it needs no network sync.
   function spawnSaved(x, y, sk, hr, id) {
-    const W = authoritative ? world : (lastView && lastView.world) || world;
+    const W = authoritative ? S.world : (lastView && lastView.world) || S.world;
     const top = shoreY(W);
     saved.push({ x, y, tx: 40 + Math.random() * (W.w - 80), ty: top + 12 + Math.random() * (SHORE_H - 26), sk: sk || 0, hr: hr || 0, sid: id || ((Math.random() * 999) | 0), state: "swim", ph: Math.random() * 6, cheer: 0 });
     if (saved.length > 30) saved.shift();
@@ -764,69 +385,28 @@ export function createGame(canvas, opts) {
     }
   }
   function emitRoster() { cbs.onRoster && cbs.onRoster(rosterList()); }
-  function emitPhase() { cbs.onPhase && cbs.onPhase(phase); }
+  function emitPhase() { cbs.onPhase && cbs.onPhase(S.phase); }
 
-  // ---- Level control ------------------------------------------------------
-  function startLevel(idx) {
-    const n = Math.max(1, players.size);
-    world = worldSize(n);
-    obstacles = makeObstacles(idx, world.w, world.h);
-    swamps = makeSwamps(idx, world.w, world.h);
-    whirls = makeWhirls(idx, world.w, world.h);
-    const L = levelParams(idx, n);
-    levelIndex = idx; caught = 0; missed = 0; timeLeft = 0; spawnTimer = 0.4; swimmers = []; splashes = []; saved = [];
-    // Spread players in a small ring around centre so rings/labels don't stack.
-    const arr = [...players.values()], ring = arr.length > 1 ? 80 : 0;
-    arr.forEach((p, i) => { const a = (i / arr.length) * Math.PI * 2; p.x = world.w / 2 + Math.cos(a) * ring; p.y = world.h / 2 + Math.sin(a) * ring; p.dashActive = 0; p.dashCooldown = 0; });
-    const me = players.get(selfId);
-    selfPos.x = me ? me.x : world.w / 2; selfPos.y = me ? me.y : world.h / 2;
-    selfPos.stun = 0; selfPos.stunCd = 0;
-    levelStartScore = new Map([...players.values()].map((p) => [p.id, p.score || 0]));
-    // Loch Ness monsters (level 2+): spawn near the edges, away from the middle.
-    monsters = [];
-    const mc = monstersForLevel(idx);
-    for (let k = 0; k < mc; k++) {
-      const edge = k % 4, m = 70;
-      let x = m + Math.random() * (world.w - m * 2), y = m + Math.random() * (world.h - m * 2);
-      if (edge === 0) y = m; else if (edge === 1) y = world.h - m; else if (edge === 2) x = m; else x = world.w - m;
-      const a = Math.random() * Math.PI * 2;
-      monsters.push({ id: monsterSeq++, x, y, vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, r: 30, wob: Math.random() * 6, dir: a });
-    }
-  }
+  // ---- Level control (the rules are in sim.js) ----------------------------
+  function startLevel(idx) { S.startLevel(idx); }
   function hostStart() {
-    if (!authoritative || phase !== Phase.LOBBY) return;
-    beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); pushState();
-  }
-  function nextLevel() {
-    levelIndex++;
-    if (levelIndex >= BASE_LEVELS.length) { phase = Phase.WIN; recordResult(); sWin(); emitPhase(); pushState(); return; }
-    startLevel(levelIndex); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); pushState();
+    if (!authoritative || S.phase !== Phase.LOBBY) return;
+    beginGame(); startLevel(0); S.phase = Phase.INTRO; S.introTimer = 2.4; emitPhase(); pushState();
   }
   function toLobby() {
-    levelIndex = 0; score = 0;
-    for (const p of players.values()) { p.rescues = 0; p.score = 0; }
-    phase = Phase.LOBBY; emitPhase(); emitRoster(); emitBoard(); pushState();
+    S.levelIndex = 0; S.score = 0;
+    for (const p of S.players.values()) { p.rescues = 0; p.score = 0; }
+    S.phase = Phase.LOBBY; emitPhase(); emitRoster(); emitBoard(); pushState();
   }
   function advance() {
     if (!authoritative) return;
-    if (phase === Phase.LOBBY) { hostStart(); return; }
-    if (phase === Phase.INTRO) { if (mode === "solo") { phase = Phase.PLAY; emitPhase(); } return; }
-    if (phase === Phase.CLEARED) { nextLevel(); return; }
-    if (phase === Phase.OVER || phase === Phase.WIN) {
-      if (mode === "solo" && !promoted) { beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
+    if (S.phase === Phase.LOBBY) { hostStart(); return; }
+    if (S.phase === Phase.INTRO) { if (mode === "solo") { S.phase = Phase.PLAY; emitPhase(); } return; }
+    if (S.phase === Phase.CLEARED) { S.nextLevel(); return; }
+    if (S.phase === Phase.OVER || S.phase === Phase.WIN) {
+      if (mode === "solo" && !promoted) { beginGame(); startLevel(0); S.phase = Phase.INTRO; S.introTimer = 2.4; emitPhase(); }
       else toLobby();
     }
-  }
-
-  function spawnSwimmer() {
-    const n = Math.max(1, players.size);
-    const L = levelParams(levelIndex, n);
-    const margin = 60;
-    let x, y, tries = 0;
-    do { x = margin + Math.random() * (world.w - margin * 2); y = margin + Math.random() * (shoreY(world) - margin * 2); tries++; }
-    while (tries < 20 && obstacles.some((o) => circleHitsRect(x, y, 26, o)));
-    const ang = Math.random() * Math.PI * 2;
-    swimmers.push({ id: swimmerSeq++, x, y, r: 16, vx: Math.cos(ang) * L.speed, vy: Math.sin(ang) * L.speed, life: L.sink, maxLife: L.sink, bob: Math.random() * Math.PI * 2, sk: (Math.random() * SKINS.length) | 0, hr: (Math.random() * HAIRS.length) | 0 });
   }
 
   // ---- Input --------------------------------------------------------------
@@ -844,144 +424,12 @@ export function createGame(canvas, opts) {
     return { dx, dy, dash: !!keys.Space || dashTap };
   }
 
-  function movePlayer(p, dt, input) {
-    p.dashCooldown = Math.max(0, p.dashCooldown - dt);
-    p.dashActive = Math.max(0, p.dashActive - dt);
-    if (input.dash && p.dashCooldown === 0) { p.dashActive = 0.18; p.dashCooldown = 0.9; if (p.id === selfId) sDash(); }
-    const speed = 300 * (p.dashActive > 0 ? 2.1 : 1) * (swamps.some((z) => inSwamp(p.x, p.y, z)) ? SWAMP_SLOW : 1);
-    p.x += input.dx * speed * dt; p.y += input.dy * speed * dt;
-    for (const o of obstacles) { const hit = circleHitsRect(p.x, p.y, p.r, o); if (hit) { p.x = hit.x; p.y = hit.y; } }
-    p.x = Math.max(p.r, Math.min(world.w - p.r, p.x));
-    p.y = Math.max(p.r, Math.min(shoreY(world) - p.r, p.y));
-  }
-
-  // Whirlpool pull on a point: inward plus a swirl, stronger toward the centre.
-  function whirlPull(o, list, dt, factor) {
-    for (const z of list) {
-      const dx = z.x - o.x, dy = z.y - o.y, d = Math.hypot(dx, dy) || 1;
-      if (d >= z.r) continue;
-      const k = 1 - d / z.r, pull = (WHIRL_PULL * k * k + 6) * factor, spin = WHIRL_SPIN * k * factor;
-      o.x += (dx / d * pull - dy / d * spin) * dt; o.y += (dy / d * pull + dx / d * spin) * dt;
-    }
-  }
-  function updateMonsters(dt) {
-    // Movement model: a heading that turns at a limited rate, a slow cruise,
-    // a lunge when prey is close, a curving wander when there is nothing to
-    // hunt, and a dive cycle (under water it can't bite and moves faster).
-    const cruise = 40 + levelIndex * 6, TURN = 1.9;
-    const angDiff = (a, b) => { let d = b - a; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d; };
-    for (const m of monsters) {
-      if (m.heading === undefined) { m.heading = m.dir || 0; m.speed = cruise; m.nextDive = 6 + Math.random() * 8; m.sub = 0; m.dive = 0; m.wanderT = Math.random() * 10; }
-      m.full = Math.max(0, (m.full || 0) - dt);
-      m.wob = (m.wob || 0) + dt * 3;
-      m.nextDive -= dt;
-      if (m.nextDive <= 0 && !(m.dive > 0)) { m.dive = 3.4; m.nextDive = 9 + Math.random() * 9; }
-      if (m.dive > 0) m.dive -= dt;
-      const wantSub = m.dive > 0.7 ? 1 : 0; m.sub += (wantSub - m.sub) * Math.min(1, dt * 3);
-      let best = null, bd = 1e9;
-      if (!(m.full > 0) && m.sub < 0.5) for (const s of swimmers) { const d = Math.hypot(s.x - m.x, s.y - m.y); if (d < bd) { bd = d; best = s; } }
-      let want, targetSpeed;
-      if (best) { want = Math.atan2(best.y - m.y, best.x - m.x); targetSpeed = bd < 150 ? cruise * 1.9 : cruise; }
-      else { m.wanderT += dt; want = m.heading + Math.sin(m.wanderT * 0.7 + m.id) * 0.8; targetSpeed = cruise * (m.sub > 0.5 ? 1.3 : 0.7); }
-      if (!best) { // keep off the walls while wandering
-        const margin = 90, cx = world.w / 2, cy = shoreY(world) / 2;
-        if (m.x < margin || m.x > world.w - margin || m.y < margin || m.y > shoreY(world) - margin) want = Math.atan2(cy - m.y, cx - m.x);
-      }
-      const d = angDiff(m.heading, want); m.heading += Math.max(-TURN * dt, Math.min(TURN * dt, d));
-      m.speed += (targetSpeed - m.speed) * Math.min(1, dt * 1.5);
-      m.vx = Math.cos(m.heading) * m.speed; m.vy = Math.sin(m.heading) * m.speed;
-      m.x += m.vx * dt; m.y += m.vy * dt;
-      // docks are solid: push out, slide along, and turn the heading with the slide
-      for (const o of obstacles) {
-        const hit = circleHitsRect(m.x, m.y, m.r * 0.75, o); if (!hit) continue;
-        m.x = hit.x; m.y = hit.y;
-        const dot = m.vx * hit.nx + m.vy * hit.ny;
-        if (dot < 0) {
-          m.vx -= dot * hit.nx; m.vy -= dot * hit.ny;
-          if (Math.hypot(m.vx, m.vy) < cruise * 0.4) { const tx = -hit.ny, ty = hit.nx, sgn = (best ? Math.sign((best.x - m.x) * tx + (best.y - m.y) * ty) : 1) || 1; m.vx = tx * sgn * cruise; m.vy = ty * sgn * cruise; }
-          m.heading = Math.atan2(m.vy, m.vx);
-        }
-      }
-      if (m.x < m.r || m.x > world.w - m.r) { m.x = Math.max(m.r, Math.min(world.w - m.r, m.x)); m.heading = Math.atan2(m.vy, -m.vx); }
-      if (m.y < m.r || m.y > shoreY(world) - m.r) { m.y = Math.max(m.r, Math.min(shoreY(world) - m.r, m.y)); m.heading = Math.atan2(-m.vy, m.vx); }
-      m.heading = Math.atan2(Math.sin(m.heading), Math.cos(m.heading)); // keep in [-π, π]
-      m.dir = m.heading;
-    }
-  }
+  // solo / host: step the sim. The local input is read inside the step (only
+  // when the ring may move); a tapped dash is used up by any PLAY tick.
   function updateSim(dt) {
-    if (phase === Phase.INTRO) { introTimer -= dt; if (introTimer <= 0) { phase = Phase.PLAY; lastSec = Math.ceil(timeLeft); sStart(); emitPhase(); } return; }
-    if (phase !== Phase.PLAY) return;
-    const n = Math.max(1, players.size);
-    const L = levelParams(levelIndex, n);
-
-    // Only the local player is integrated here; remote players own their own
-    // position and report it via applyPeerInput, so what each client sees is real.
-    const meP = players.get(selfId);
-    selfPos.stun = Math.max(0, (selfPos.stun || 0) - dt);
-    selfPos.stunCd = Math.max(0, (selfPos.stunCd || 0) - dt);
-    if (meP && selfPos.stun <= 0 && selfPos.stunCd <= 0) {
-      for (const m of monsters) { if (!(m.sub > 0.5) && Math.hypot(meP.x - m.x, meP.y - m.y) < m.r + meP.r) { selfPos.stun = 1.0; selfPos.stunCd = 1.5; sStun(); break; } }
-    }
-    if (meP) { movePlayer(meP, dt, selfPos.stun > 0 ? { dx: 0, dy: 0, dash: false } : localInput()); whirlPull(meP, whirls, dt, WHIRL_PLAYER); meP.stunned = selfPos.stun > 0; selfPos.x = meP.x; selfPos.y = meP.y; }
-    for (const p of players.values()) { if (p.id !== selfId) p.dashActive = Math.max(0, p.dashActive - dt); }
-    dashTap = false;
-
-    spawnTimer -= dt;
-    if (spawnTimer <= 0 && swimmers.length < L.maxOnScreen) { spawnSwimmer(); spawnTimer = L.spawn / 1000; }
-
-    updateMonsters(dt);
-
-    for (let i = swimmers.length - 1; i >= 0; i--) {
-      const s = swimmers[i];
-      s.x += s.vx * dt; s.y += s.vy * dt; s.bob += dt * 4;
-      if (s.x < s.r || s.x > world.w - s.r) { s.vx *= -1; s.x = Math.max(s.r, Math.min(world.w - s.r, s.x)); }
-      if (s.y < s.r || s.y > shoreY(world) - s.r) { s.vy *= -1; s.y = Math.max(s.r, Math.min(shoreY(world) - s.r, s.y)); }
-      for (const o of obstacles) { const hit = circleHitsRect(s.x, s.y, s.r, o); if (hit) { s.x = hit.x; s.y = hit.y; const dot = s.vx * hit.nx + s.vy * hit.ny; s.vx -= 2 * dot * hit.nx; s.vy -= 2 * dot * hit.ny; } }
-      s.life -= dt;
-      // whirlpool: drawn slowly toward the centre; at the core the swimmer is lost
-      if (whirls.length) {
-        whirlPull(s, whirls, dt, 1);
-        if (whirls.some((z) => Math.hypot(z.x - s.x, z.y - s.y) < z.r * WHIRL_CORE)) {
-          missed++; combo = 0; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 0]); sMiss();
-          swimmers.splice(i, 1);
-          if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
-          continue;
-        }
-      }
-
-      let rescuer = null;
-      for (const p of players.values()) { if (Math.hypot(s.x - p.x, s.y - p.y) < p.r + s.r) { rescuer = p; break; } }
-      if (rescuer) {
-        // Gentle ramp: 10 points on level 1 -> 24 on level 8. Credited to the
-        // team total AND to the player whose ring touched the swimmer.
-        caught++; totalCaught++; combo++; if (combo > bestCombo) bestCombo = combo;
-        const pts = 10 + levelIndex * 2; score += pts;
-        rescuer.rescues = (rescuer.rescues || 0) + 1; rescuer.score = (rescuer.score || 0) + pts;
-        splashes.push({ x: s.x, y: s.y, t: 0, good: true }); fxOut.push([Math.round(s.x), Math.round(s.y), 1, s.sk, s.hr, s.id]); sRescue(); spawnSaved(s.x, s.y, s.sk, s.hr, s.id);
-        swimmers.splice(i, 1);
-        if (caught >= L.quota) { phase = Phase.CLEARED; sClear(); emitPhase(); pushState(); return; }
-        continue;
-      }
-      // Loch Ness monster: must hold a swimmer for EAT_DWELL seconds before
-      // eating it (a red danger ring rises) so a rescue can still snatch them
-      // back; a satiated monster can't bite. Counts as a miss; livboj is safe.
-      let biter = null;
-      for (const m of monsters) { if (!(m.full > 0) && !(m.sub > 0.5) && Math.hypot(s.x - m.x, s.y - m.y) < m.r + s.r) { biter = m; break; } }
-      s.chomp = biter ? (s.chomp || 0) + dt : Math.max(0, (s.chomp || 0) - dt * 1.5);
-      if (biter && s.chomp >= EAT_DWELL) {
-        biter.full = 1.5;
-        missed++; combo = 0; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 2]); sChomp();
-        swimmers.splice(i, 1);
-        if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
-        continue;
-      }
-      if (s.life <= 0) {
-        missed++; combo = 0; splashes.push({ x: s.x, y: s.y, t: 0, good: false }); fxOut.push([Math.round(s.x), Math.round(s.y), 0]); sMiss();
-        swimmers.splice(i, 1);
-        if (missed > L.allowedMisses) { phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState(); return; }
-      }
-    }
-    for (let i = splashes.length - 1; i >= 0; i--) { splashes[i].t += dt; if (splashes[i].t > 0.6) splashes.splice(i, 1); }
+    const wasPlay = S.phase === Phase.PLAY;
+    S.update(dt, localInput);
+    if (wasPlay) dashTap = false;
   }
 
   function updateJoin(dt) {
@@ -1006,23 +454,25 @@ export function createGame(canvas, opts) {
   }
 
   // ---- State sync ---------------------------------------------------------
+  // The snapshot format is the wire protocol between host and joiners (who may
+  // run an older or newer build for a few minutes after a deploy): keep it as is.
   function pushState() {
     if (!sendState) return;
-    const L = levelParams(levelIndex, Math.max(1, players.size));
+    const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
     const snap = {
-      hostId: selfId, phase, levelIndex, score, caught, missed, timeLeft,
-      quota: phase === Phase.LOBBY ? 0 : L.quota, allowedMisses: L.allowedMisses, world, introTimer,
-      obstacles: obstacles.map((o) => [o.x, o.y, o.w, o.h]),
-      swamps: swamps.map((z) => [z.x, z.y, z.w, z.h]),
-      whirls: whirls.map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
-      swimmers: swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr, +Math.min(1, (s.chomp || 0) / EAT_DWELL).toFixed(2)]),
-      monsters: monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r, +(m.sub || 0).toFixed(2)]),
-      players: [...players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
-      fx: fxOut,
+      hostId: selfId, phase: S.phase, levelIndex: S.levelIndex, score: S.score, caught: S.caught, missed: S.missed, timeLeft: S.timeLeft,
+      quota: S.phase === Phase.LOBBY ? 0 : L.quota, allowedMisses: L.allowedMisses, world: S.world, introTimer: S.introTimer,
+      obstacles: S.obstacles.map((o) => [o.x, o.y, o.w, o.h]),
+      swamps: S.swamps.map((z) => [z.x, z.y, z.w, z.h]),
+      whirls: S.whirls.map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
+      swimmers: S.swimmers.map((s) => [s.id, Math.round(s.x), Math.round(s.y), s.r, +(s.life / s.maxLife).toFixed(2), s.sk, s.hr, +Math.min(1, (s.chomp || 0) / EAT_DWELL).toFixed(2)]),
+      monsters: S.monsters.map((m) => [m.id, Math.round(m.x), Math.round(m.y), +m.dir.toFixed(2), m.r, +(m.sub || 0).toFixed(2)]),
+      players: [...S.players.values()].map((p) => [p.id, Math.round(p.x), Math.round(p.y), p.name, p.dashActive > 0 ? 1 : 0, p.hue, p.rescues || 0, p.stunned ? 1 : 0, p.score || 0]),
+      fx: S.fxOut,
       // joiners only ever see team games, so send the top team entries (not solo runs)
-      board: (phase === Phase.LOBBY || phase === Phase.OVER || phase === Phase.WIN) ? board.filter((e) => e.n >= 2).slice(0, BOARD_SHOW) : undefined,
+      board: (S.phase === Phase.LOBBY || S.phase === Phase.OVER || S.phase === Phase.WIN) ? board.filter((e) => e.n >= 2).slice(0, BOARD_SHOW) : undefined,
     };
-    fxOut = [];
+    S.fxOut = [];
     try { sendState(snap); } catch {}
   }
 
@@ -1087,19 +537,19 @@ export function createGame(canvas, opts) {
     if (authoritative) return;
     authoritative = true; promoted = true; hostId = selfId;
     const v = lastView;
-    world = v.world; obstacles = v.obstacles.map((o) => ({ ...o })); swamps = (v.swamps || []).map((z) => ({ ...z })); whirls = (v.whirls || []).map((z) => ({ ...z }));
-    levelIndex = v.levelIndex; score = v.score; caught = v.caught; missed = v.missed; timeLeft = v.timeLeft; phase = v.phase;
-    const L = levelParams(levelIndex, Math.max(1, iPlayer.size));
-    players = new Map();
+    S.world = v.world; S.obstacles = v.obstacles.map((o) => ({ ...o })); S.swamps = (v.swamps || []).map((z) => ({ ...z })); S.whirls = (v.whirls || []).map((z) => ({ ...z }));
+    S.levelIndex = v.levelIndex; S.score = v.score; S.caught = v.caught; S.missed = v.missed; S.timeLeft = v.timeLeft; S.phase = v.phase;
+    const L = levelParams(S.levelIndex, Math.max(1, iPlayer.size));
+    S.players = new Map();
     for (const [id, p] of iPlayer) {
       if (id === v.hostId) continue;
-      players.set(id, { id, name: id === selfId ? myName : (p.name || "Spelare"), x: id === selfId ? selfPos.x : p.x, y: id === selfId ? selfPos.y : p.y, r: 30, hue: p.hue, dashActive: 0, dashCooldown: 0, rescues: p.rescues || 0, input: { dx: 0, dy: 0, dash: false } });
+      S.players.set(id, { id, name: id === selfId ? myName : (p.name || "Spelare"), x: id === selfId ? selfPos.x : p.x, y: id === selfId ? selfPos.y : p.y, r: 30, hue: p.hue, dashActive: 0, dashCooldown: 0, rescues: p.rescues || 0, input: { dx: 0, dy: 0, dash: false } });
     }
-    if (!players.has(selfId)) addPlayer(selfId, myName);
-    swimmers = [];
-    for (const [id, s] of iSwim) { const ang = Math.random() * Math.PI * 2; swimmers.push({ id, x: s.x, y: s.y, r: s.r || 16, vx: Math.cos(ang) * L.speed, vy: Math.sin(ang) * L.speed, life: (s.frac || 1) * L.sink, maxLife: L.sink, bob: Math.random() * 6, sk: s.sk || 0, hr: s.hr || 0 }); swimmerSeq = Math.max(swimmerSeq, id + 1); }
+    if (!S.players.has(selfId)) addPlayer(selfId, myName);
+    S.swimmers = [];
+    for (const [id, s] of iSwim) { const ang = Math.random() * Math.PI * 2; S.swimmers.push({ id, x: s.x, y: s.y, r: s.r || 16, vx: Math.cos(ang) * L.speed, vy: Math.sin(ang) * L.speed, life: (s.frac || 1) * L.sink, maxLife: L.sink, bob: Math.random() * 6, sk: s.sk || 0, hr: s.hr || 0 }); S.swimmerSeq = Math.max(S.swimmerSeq, id + 1); }
     sendState = (snap) => { try { A.st[0](snap); } catch {} };
-    A.hi[1]((data, peer) => { const p = players.get(peer); if (p) renamePlayer(peer, (data && data.name) || p.name); else addPlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
+    A.hi[1]((data, peer) => { const p = S.players.get(peer); if (p) renamePlayer(peer, (data && data.name) || p.name); else addPlayer(peer, (data && data.name) || "Spelare"); emitRoster(); pushState(); });
     A.inp[1]((data, peer) => { applyPeerInput(peer, data); });
     startBroadcast();
     emitRoster(); emitPhase(); emitBoard(); pushState();
@@ -1123,823 +573,21 @@ export function createGame(canvas, opts) {
         phase: lastView.phase, introTimer: lastView.introTimer, board: lastView.board || [],
       };
     }
-    const L = levelParams(levelIndex, Math.max(1, players.size));
-    return { world, obstacles, swamps, whirls, swimmers, monsters, players: [...players.values()], splashes, hud: { score, yourScore: (players.get(selfId) || {}).score || 0, level: levelIndex, caught, quota: L.quota, missed, allowedMisses: L.allowedMisses, n: players.size }, phase, introTimer, board };
-  }
-
-  // ---- Rendering ----------------------------------------------------------
-  let waveT = 0;
-  let causticPat = null; // water caustics pattern, created on first draw
-  function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
-  function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
-  function drawWater(w, h, t) {
-    const shore = shoreY({ w, h });
-    // depth: sky-tinted far edge -> deep blue -> clearer teal shallows by the beach
-    const g = ctx.createLinearGradient(0, 0, 0, shore);
-    g.addColorStop(0, "#2b7fa4"); g.addColorStop(0.16, "#17688b"); g.addColorStop(0.55, "#0f4f72"); g.addColorStop(0.88, "#146384"); g.addColorStop(1, "#2c8ba6");
-    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    // refracted sunlight: scrolling caustic layers (one when the water is crowded)
-    if (!causticPat) causticPat = ctx.createPattern(causticTile(), "repeat");
-    const layers = lowFx ? [[1.7, 0.12, 9, 6]] : [[1.7, 0.11, 9, 6], [0.95, 0.07, -13, 4]];
-    ctx.save(); ctx.globalCompositeOperation = "screen";
-    for (const [s, op, vx, vy] of layers) {
-      const ox = (t * vx) % (256 * s), oy = (t * vy) % (256 * s);
-      ctx.save(); ctx.globalAlpha = op; ctx.translate(ox, oy); ctx.scale(s, s); ctx.fillStyle = causticPat;
-      ctx.fillRect(-ox / s - 256, -oy / s - 256, w / s + 512, h / s + 512); ctx.restore();
-    }
-    ctx.restore();
-    // sky reflection along the far edge
-    const sky = ctx.createLinearGradient(0, 0, 0, h * 0.2);
-    sky.addColorStop(0, "rgba(195,228,246,0.22)"); sky.addColorStop(1, "rgba(195,228,246,0)");
-    ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h * 0.2);
-    // sun patch with twinkling glitter
-    const gx = w * 0.62 + Math.sin(t * 0.21) * w * 0.14, gy = h * 0.3 + Math.cos(t * 0.16) * h * 0.08, grd = Math.min(w, h) * 0.55;
-    const sun = ctx.createRadialGradient(gx, gy, 0, gx, gy, grd);
-    sun.addColorStop(0, "rgba(220,240,255,0.16)"); sun.addColorStop(0.45, "rgba(220,240,255,0.05)"); sun.addColorStop(1, "rgba(220,240,255,0)");
-    ctx.fillStyle = sun; ctx.fillRect(gx - grd, gy - grd, grd * 2, grd * 2);
-    if (!lowFx) {
-      ctx.fillStyle = "#ffffff";
-      for (let i = 0; i < 70; i++) {
-        const a = i * 2.399, rr = Math.sqrt((i + 0.5) / 70) * grd * 0.8;
-        const sx = gx + Math.cos(a) * rr, sy = gy + Math.sin(a) * rr * 0.6;
-        const tw = Math.sin(t * (2.2 + (i % 5) * 0.4) + i * 1.7);
-        if (tw > 0.55) { ctx.globalAlpha = (tw - 0.55) * 1.6 * (1 - rr / (grd * 0.8)); ctx.beginPath(); ctx.ellipse(sx, sy, 3.2, 1.1, 0, 0, Math.PI * 2); ctx.fill(); }
-      }
-      ctx.globalAlpha = 1;
-    }
-    // swell: rows of crests whose height breathes along x; shadowed trough, lit crest, foam flecks
-    ctx.save(); ctx.lineCap = "round";
-    const rows = Math.max(5, Math.round(shore / 82));
-    for (let row = 0; row < rows; row++) {
-      // uneven spacing and strength so the swell doesn't read as ruled lines
-      const y0 = (row + 0.55 + 0.25 * Math.sin(row * 2.3)) * (shore / rows), ph = row * 1.7, sp = 0.7 + (row % 3) * 0.25, str = (0.7 + 0.3 * Math.sin(row * 1.3 + 0.5)) * (0.55 + 0.45 * (row + 1) / rows); // fainter far away
-      const crest = (x) => Math.sin(x * 0.014 + t * sp + ph) * 7 * (0.55 + 0.45 * Math.sin(x * 0.004 + t * 0.3 + row));
-      const path = (dy) => { ctx.beginPath(); for (let x = -10; x <= w + 10; x += 16) { const y = y0 + dy + crest(x); x === -10 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } };
-      ctx.strokeStyle = `rgba(4,28,48,${0.16 * str})`; ctx.lineWidth = 5; path(4); ctx.stroke();
-      ctx.strokeStyle = `rgba(190,230,250,${0.18 * str})`; ctx.lineWidth = 1.8; path(0); ctx.stroke();
-      if (!lowFx && row % 3 === 1) { // a few foam flecks, only on some crests
-        ctx.setLineDash([2, 34, 3, 61]); ctx.lineDashOffset = -t * 26 - row * 7;
-        ctx.strokeStyle = "rgba(255,255,255,0.42)"; ctx.lineWidth = 1.8; path(-1); ctx.stroke(); ctx.setLineDash([]);
-      }
-    }
-    ctx.restore();
-    // shallows: sand showing through, with ripple lines on the bottom
-    const sh = ctx.createLinearGradient(0, shore - 90, 0, shore);
-    sh.addColorStop(0, "rgba(214,190,140,0)"); sh.addColorStop(1, "rgba(214,190,140,0.36)");
-    ctx.fillStyle = sh; ctx.fillRect(0, shore - 90, w, 90);
-    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
-    for (let k = 0; k < 4; k++) { const yy = shore - 14 - k * 16; ctx.beginPath(); for (let x = 0; x <= w; x += 12) { const y = yy + Math.sin(x * 0.09 + t * 1.2 + k) * 2; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
-    // soft depth vignette
-    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.78);
-    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.22)");
-    ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
-  }
-  function drawShore(w, h) {
-    const y0 = shoreY({ w, h });
-    const g = ctx.createLinearGradient(0, y0, 0, h);
-    g.addColorStop(0, "#cdb583"); g.addColorStop(0.16, "#e7d4a4"); g.addColorStop(1, "#d6bd85");
-    ctx.fillStyle = g; ctx.fillRect(0, y0, w, SHORE_H);
-    // wet sand with a faint sky reflection
-    const wet = ctx.createLinearGradient(0, y0, 0, y0 + 18);
-    wet.addColorStop(0, "rgba(120,150,170,0.38)"); wet.addColorStop(1, "rgba(150,120,70,0)");
-    ctx.fillStyle = wet; ctx.fillRect(0, y0, w, 18);
-    // foam edge: two soft white bands breathing with the swell, plus bubbles
-    const edge = (x) => y0 + Math.sin(x * 0.05 + waveT * 1.6) * 3 + Math.sin(x * 0.013 - waveT * 0.9) * 2;
-    ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.beginPath();
-    for (let x = 0; x <= w; x += 12) { const yy = edge(x); x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
-    ctx.lineTo(w, y0 - 7); ctx.lineTo(0, y0 - 7); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.32)"; ctx.beginPath();
-    for (let x = 0; x <= w; x += 12) { const yy = edge(x) - 6 + Math.sin(x * 0.11 + waveT * 2) * 2; x === 0 ? ctx.moveTo(x, yy) : ctx.lineTo(x, yy); }
-    ctx.lineTo(w, y0 - 17); ctx.lineTo(0, y0 - 17); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = "#ffffff";
-    for (let i = 0; i < Math.round(w / 22); i++) {
-      const bx = (i * 61) % w, by = y0 - 3 - ((i * 37) % 9), br = 1 + (i % 3) * 0.6;
-      ctx.globalAlpha = 0.25 + 0.45 * Math.abs(Math.sin(waveT * 1.5 + i)); ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    // sand speckles
-    ctx.fillStyle = "rgba(120,95,55,0.22)";
-    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 12 + ((i * 53) % (SHORE_H - 14)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
-  }
-  function drawSaved(sv) {
-    const skin = SKINS[sv.sk % SKINS.length], hair = HAIRS[sv.hr % HAIRS.length], suit = SUITS[sv.sid % SUITS.length];
-    if (sv.state === "swim") {
-      const cy = sv.y + Math.sin(sv.ph) * 1.5;
-      ctx.strokeStyle = "rgba(190,225,240,0.35)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(sv.x, cy + 5, 12, 5, 0, 0, Math.PI * 2); ctx.stroke();
-      const wv = Math.sin(sv.ph * 1.4) * 3;
-      ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
-      ctx.beginPath(); ctx.moveTo(sv.x - 5, cy); ctx.lineTo(sv.x - 10, cy - 5 + wv); ctx.moveTo(sv.x + 5, cy); ctx.lineTo(sv.x + 10, cy - 5 - wv); ctx.stroke(); ctx.lineCap = "butt";
-      shadedBall(sv.x, cy, 8, skin);
-      ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(sv.x, cy - 1, 8, Math.PI, Math.PI * 2); ctx.fill();
-    } else {
-      const jump = Math.abs(Math.sin(sv.cheer * 6)) * 6, bx = sv.x, by = sv.y - jump;
-      ctx.fillStyle = "rgba(0,0,0,0.15)"; ctx.beginPath(); ctx.ellipse(sv.x, sv.y + 11, 9, 3, 0, 0, Math.PI * 2); ctx.fill();
-      if (lowFx) { ctx.fillStyle = suit; } else { const tg = ctx.createLinearGradient(bx, by - 1, bx, by + 11); tg.addColorStop(0, hi(suit)); tg.addColorStop(1, shade(suit)); ctx.fillStyle = tg; }
-      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx - 5, by - 1, 10, 12, 3) : ctx.rect(bx - 5, by - 1, 10, 12); ctx.fill();
-      ctx.strokeStyle = skin; ctx.lineWidth = 3; ctx.lineCap = "round";
-      ctx.beginPath(); ctx.moveTo(bx - 3, by + 11); ctx.lineTo(bx - 3, by + 18); ctx.moveTo(bx + 3, by + 11); ctx.lineTo(bx + 3, by + 18); ctx.stroke();
-      const raise = 2 + Math.sin(sv.cheer * 6) * 2;
-      ctx.beginPath(); ctx.moveTo(bx - 4, by + 1); ctx.lineTo(bx - 10, by - 8 - raise); ctx.moveTo(bx + 4, by + 1); ctx.lineTo(bx + 10, by - 8 - raise); ctx.stroke(); ctx.lineCap = "butt";
-      shadedBall(bx, by - 8, 6, skin);
-      ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(bx, by - 9, 6, Math.PI, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "#3a2a1c"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(bx, by - 7, 2.4, 0.12 * Math.PI, 0.88 * Math.PI); ctx.stroke();
-    }
-  }
-  function drawScenery(w, h) {
-    const gy = shoreY({ w, h });
-    drawTower(w * 0.15, gy);
-    drawUmbrella(w * 0.85, gy);
-    drawStarfish(w * 0.63, gy + 52);
-    drawBeachBall(w * 0.5, gy + 50);
-  }
-  function drawTower(bx, gy) {
-    const cabW = 42, cabH = 30, legH = 26, baseY = gy + 42, cy = baseY - legH - cabH;
-    // legs + cross braces
-    ctx.strokeStyle = "#8a5a2b"; ctx.lineWidth = 4; ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(bx - cabW * 0.42, baseY); ctx.lineTo(bx - cabW * 0.3, baseY - legH);
-    ctx.moveTo(bx + cabW * 0.42, baseY); ctx.lineTo(bx + cabW * 0.3, baseY - legH);
-    ctx.moveTo(bx - cabW * 0.4, baseY - legH * 0.5); ctx.lineTo(bx + cabW * 0.4, baseY - legH * 0.5);
-    ctx.stroke(); ctx.lineCap = "butt";
-    // cabin (with a soft warm outline)
-    ctx.fillStyle = "#cf934f"; ctx.fillRect(bx - cabW / 2, cy, cabW, cabH);
-    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.strokeRect(bx - cabW / 2, cy, cabW, cabH);
-    ctx.fillStyle = "#0e3b52"; ctx.fillRect(bx - cabW * 0.32, cy + 5, cabW * 0.64, cabH * 0.4);
-    ctx.fillStyle = "#a86a34"; ctx.fillRect(bx - cabW / 2, cy + cabH * 0.52, cabW, 3);
-    // red-cross panel
-    ctx.fillStyle = "#e5484d"; ctx.fillRect(bx - 7, cy + cabH * 0.6, 14, 10);
-    ctx.fillStyle = "#fff"; ctx.fillRect(bx - 1.5, cy + cabH * 0.6 + 2, 3, 6); ctx.fillRect(bx - 5, cy + cabH * 0.6 + 3.5, 10, 3);
-    // roof
-    ctx.fillStyle = "#e5484d"; ctx.beginPath(); ctx.moveTo(bx - cabW * 0.62, cy); ctx.lineTo(bx, cy - 16); ctx.lineTo(bx + cabW * 0.62, cy); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
-    // flag
-    ctx.strokeStyle = "#7a4f2a"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(bx + cabW * 0.5, cy - 16); ctx.lineTo(bx + cabW * 0.5, cy - 42); ctx.stroke();
-    ctx.fillStyle = "#ffb020"; const fl = Math.sin(waveT * 4) * 3;
-    ctx.beginPath(); ctx.moveTo(bx + cabW * 0.5, cy - 42); ctx.lineTo(bx + cabW * 0.5 + 16, cy - 38 + fl); ctx.lineTo(bx + cabW * 0.5, cy - 33); ctx.closePath(); ctx.fill();
-  }
-  function drawUmbrella(bx, gy) {
-    const baseY = gy + 48, topY = baseY - 42, R = 28;
-    ctx.fillStyle = "rgba(0,0,0,0.12)"; ctx.beginPath(); ctx.ellipse(bx, baseY, 14, 4, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#7a4f2a"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(bx, baseY); ctx.lineTo(bx, topY); ctx.stroke();
-    const cols = ["#e5484d", "#f4f4f0"];
-    for (let k = 0; k < 6; k++) { ctx.fillStyle = cols[k % 2]; ctx.beginPath(); ctx.moveTo(bx, topY); ctx.arc(bx, topY, R, Math.PI + k * Math.PI / 6, Math.PI + (k + 1) * Math.PI / 6); ctx.closePath(); ctx.fill(); }
-    ctx.fillStyle = "#c93a3e"; for (let k = 0; k < 6; k++) { const a = Math.PI + (k + 0.5) * Math.PI / 6; ctx.beginPath(); ctx.arc(bx + Math.cos(a) * R, topY + Math.sin(a) * R, 3, 0, Math.PI * 2); ctx.fill(); }
-    // canopy outline
-    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath(); ctx.arc(bx, topY, R, Math.PI, Math.PI * 2); ctx.closePath(); ctx.stroke();
-    ctx.fillStyle = "#7a4f2a"; ctx.beginPath(); ctx.arc(bx, topY - 2, 2.6, 0, Math.PI * 2); ctx.fill();
-  }
-  function drawBeachBall(bx, by) {
-    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.fill();
-    const cols = ["#e5484d", "#3aa0ff", "#ffb020"];
-    for (let k = 0; k < 3; k++) { ctx.fillStyle = cols[k]; ctx.beginPath(); ctx.moveTo(bx, by); ctx.arc(bx, by, 8, k * 2 * Math.PI / 3, (k * 2 / 3 + 0.24) * Math.PI); ctx.closePath(); ctx.fill(); }
-    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(bx, by, 8, 0, Math.PI * 2); ctx.stroke();
-  }
-  function drawStarfish(bx, by) {
-    ctx.save(); ctx.translate(bx, by); ctx.fillStyle = "#f2884b"; ctx.beginPath();
-    for (let k = 0; k < 5; k++) { const a = -Math.PI / 2 + k * 2 * Math.PI / 5; ctx.lineTo(Math.cos(a) * 7, Math.sin(a) * 7); const a2 = a + Math.PI / 5; ctx.lineTo(Math.cos(a2) * 3, Math.sin(a2) * 3); }
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "rgba(45,26,10,0.42)"; ctx.lineWidth = 1.6; ctx.lineJoin = "round"; ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-  }
-  function drawSeagulls(w, t) {
-    ctx.strokeStyle = "rgba(240,246,252,0.85)"; ctx.lineCap = "round";
-    for (let i = 0; i < GULLS.length; i++) {
-      const g = GULLS[i], x = ((t * g.sp + g.x0) % (w + 100)) - 50, y = g.y + Math.sin(t * 0.8 + i) * 6, wing = 5 + (Math.sin(t * 8 + g.ph) + 1) / 2 * 4;
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(x - 9, y); ctx.quadraticCurveTo(x - 3, y - wing, x, y); ctx.quadraticCurveTo(x + 3, y - wing, x + 9, y); ctx.stroke();
-      ctx.fillStyle = "rgba(240,246,252,0.85)"; ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.lineCap = "butt";
-  }
-  function drawSwamp(z) {
-    // an organic blob (three sine harmonics on an ellipse), feathered edge, murk thickening inward
-    const cx = z.x + z.w / 2, cy = z.y + z.h / 2, rx = z.w / 2, ry = z.h / 2, seed = z.x * 0.03 + z.y * 0.07;
-    const rad = (a) => 1 + 0.07 * Math.sin(a * 3 + seed) + 0.05 * Math.sin(a * 5 + seed * 1.3) + 0.03 * Math.sin(a * 8 - seed);
-    const blob = (k) => { ctx.beginPath(); for (let i = 0; i <= 64; i++) { const a = i / 64 * Math.PI * 2, f = rad(a) * k; const x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.closePath(); };
-    for (let k = 3; k >= 1; k--) { blob(1 + k * 0.045); ctx.fillStyle = "rgba(70,95,40,0.07)"; ctx.fill(); }
-    const g = ctx.createRadialGradient(cx, cy, Math.min(rx, ry) * 0.2, cx, cy, Math.max(rx, ry));
-    g.addColorStop(0, "rgba(45,70,30,0.62)"); g.addColorStop(0.7, "rgba(60,90,40,0.45)"); g.addColorStop(1, "rgba(70,95,40,0.28)");
-    blob(1); ctx.fillStyle = g; ctx.fill();
-    ctx.strokeStyle = "rgba(120,150,70,0.22)"; ctx.lineWidth = 2; ctx.stroke();
-    // scum streaks drifting on the surface
-    ctx.strokeStyle = "rgba(150,170,90,0.18)"; ctx.lineWidth = 3; ctx.lineCap = "round";
-    for (let i = 0; i < 5; i++) { const a = seed + i * 1.3, px = cx + Math.cos(a) * rx * 0.5, py = cy + Math.sin(a) * ry * 0.5 + Math.sin(waveT * 0.5 + i) * 3; ctx.beginPath(); ctx.moveTo(px - 18, py); ctx.quadraticCurveTo(px, py - 4, px + 18, py + 2); ctx.stroke(); }
-    // lily pads (bobbing) inside the blob, a few with a flower
-    for (let i = 0; i < 8; i++) {
-      const a = seed * 0.7 + i * 2.4, f = 0.25 + ((i * 37) % 60) / 100, px = cx + Math.cos(a) * rx * f, py = cy + Math.sin(a) * ry * f, r = 7 + (i % 3) * 2, wob = Math.sin(waveT * 1.2 + i) * 1.5;
-      ctx.fillStyle = "rgba(90,150,70,0.92)"; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.arc(px, py + wob, r, 0.35 + i, Math.PI * 2 - 0.35 + i); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = "rgba(60,110,50,0.5)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px, py + wob); ctx.lineTo(px + Math.cos(i) * r * 0.8, py + wob + Math.sin(i) * r * 0.8); ctx.stroke();
-      ctx.fillStyle = "rgba(160,200,120,0.5)"; ctx.beginPath(); ctx.arc(px - r * 0.3, py + wob - r * 0.3, r * 0.35, 0, Math.PI * 2); ctx.fill();
-      if (i % 4 === 0) { ctx.fillStyle = "rgba(255,190,220,0.9)"; ctx.beginPath(); ctx.arc(px + r * 0.4, py + wob - r * 0.5, 2.4, 0, Math.PI * 2); ctx.fill(); }
-    }
-    // reeds around the rim, swaying; every third one a cattail
-    for (let i = 0; i < 14; i++) {
-      const a = seed + i * 0.45 + (i % 2) * 0.2, f = rad(a) * (0.86 + (i % 3) * 0.05), rx0 = cx + Math.cos(a) * rx * f, ry0 = cy + Math.sin(a) * ry * f, hgt = 18 + (i % 4) * 7, sway = Math.sin(waveT * 1.6 + i) * 3;
-      ctx.strokeStyle = i % 3 ? "rgba(60,95,35,0.85)" : "rgba(95,120,45,0.85)"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(rx0, ry0); ctx.quadraticCurveTo(rx0 + sway, ry0 - hgt * 0.6, rx0 + sway * 1.6, ry0 - hgt); ctx.stroke();
-      if (i % 3 === 0) { ctx.fillStyle = "#6b4a2a"; ctx.beginPath(); ctx.ellipse(rx0 + sway * 1.6, ry0 - hgt, 1.8, 4, 0, 0, Math.PI * 2); ctx.fill(); }
-    }
-    ctx.lineCap = "butt";
-  }
-  function drawBrygga(o) {
-    const horiz = o.w >= o.h, L = horiz ? o.w : o.h, T = horiz ? o.h : o.w; // along / across
-    const seed = Math.round(o.x * 7 + o.y * 13);
-    const rnd = (i) => { const v = Math.sin(seed + i * 12.9898) * 43758.5453; return v - Math.floor(v); };
-    // pilings: round posts along both long edges, standing in the water
-    const nPost = Math.max(2, Math.round(L / 110)), pr = T * 0.22;
-    const posts = [];
-    for (let i = 0; i < nPost; i++) { const a = (i + 0.5) / nPost; for (const side of [-1, 1]) posts.push(horiz ? [o.x + a * L, o.y + o.h / 2 + side * (T / 2 + pr * 0.35)] : [o.x + o.w / 2 + side * (T / 2 + pr * 0.35), o.y + a * L]); }
-    // shadow and wet reflection under the deck
-    ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 5, o.y + 9, o.w, o.h, 3); ctx.fill();
-    ctx.fillStyle = "rgba(0,10,20,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 4, o.y + o.h - 2, o.w + 8, 14, 4); ctx.fill();
-    for (const [px, py] of posts) {
-      ctx.fillStyle = "rgba(0,10,20,0.25)"; ctx.beginPath(); ctx.ellipse(px + 2, py + 5, pr * 1.3, pr * 0.8, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(220,240,250,0.28)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(px, py + 3, pr * 1.7, pr * 0.9, 0, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = "#3d2612"; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
-    }
-    // deck: planks laid across the dock — mixed wood tones and grey weathered boards, the odd one missing or cracked
-    const PALETTE = ["#a8713d", "#b07a44", "#9a6635", "#a46b38", "#8d7a62", "#7f7468"];
-    const nn = Math.max(3, Math.round(L / 18)), pw = L / nn, ins = 0.6;
-    const rect = (s0) => horiz ? [o.x + s0 + ins, o.y, pw - ins * 2, o.h] : [o.x, o.y + s0 + ins, o.w, pw - ins * 2];
-    for (let i = 0; i < nn; i++) {
-      const s0 = pw * i, r1 = rnd(i), r2 = rnd(i + 31), r3 = rnd(i + 71);
-      if (r3 > 0.93 && i > 0 && i < nn - 1) { // missing plank: dark water and two broken stubs
-        ctx.fillStyle = "rgba(6,28,44,0.78)"; ctx.fillRect(...rect(s0));
-        const stub = T * (0.16 + rnd(i + 5) * 0.14), col = shade(PALETTE[Math.floor(r1 * PALETTE.length)]);
-        ctx.fillStyle = col;
-        ctx.beginPath();
-        if (horiz) { const x0 = o.x + s0 + ins, x1 = x0 + pw - ins * 2; ctx.moveTo(x0, o.y); ctx.lineTo(x1, o.y); ctx.lineTo(x1, o.y + stub * 0.7); ctx.lineTo((x0 + x1) / 2, o.y + stub * 1.3); ctx.lineTo(x0, o.y + stub * 0.9); ctx.closePath(); ctx.fill();
-          ctx.beginPath(); ctx.moveTo(x0, o.y + o.h); ctx.lineTo(x1, o.y + o.h); ctx.lineTo(x1, o.y + o.h - stub * 1.1); ctx.lineTo((x0 + x1) / 2, o.y + o.h - stub * 0.6); ctx.lineTo(x0, o.y + o.h - stub); ctx.closePath(); ctx.fill(); }
-        else { const y0 = o.y + s0 + ins, y1 = y0 + pw - ins * 2; ctx.moveTo(o.x, y0); ctx.lineTo(o.x, y1); ctx.lineTo(o.x + stub * 0.7, y1); ctx.lineTo(o.x + stub * 1.3, (y0 + y1) / 2); ctx.lineTo(o.x + stub * 0.9, y0); ctx.closePath(); ctx.fill();
-          ctx.beginPath(); ctx.moveTo(o.x + o.w, y0); ctx.lineTo(o.x + o.w, y1); ctx.lineTo(o.x + o.w - stub * 1.1, y1); ctx.lineTo(o.x + o.w - stub * 0.6, (y0 + y1) / 2); ctx.lineTo(o.x + o.w - stub, y0); ctx.closePath(); ctx.fill(); }
-        continue;
-      }
-      const base = tint(PALETTE[Math.floor(r1 * PALETTE.length)], 0.9 + r2 * 0.2);
-      const g = horiz ? ctx.createLinearGradient(0, o.y, 0, o.y + o.h) : ctx.createLinearGradient(o.x, 0, o.x + o.w, 0);
-      g.addColorStop(0, hi(base)); g.addColorStop(0.45, base); g.addColorStop(1, shade(base));
-      ctx.fillStyle = g; ctx.fillRect(...rect(s0));
-      // grain: two faint lines along the plank
-      ctx.strokeStyle = "rgba(60,35,15,0.22)"; ctx.lineWidth = 1;
-      for (let k = 0; k < 2; k++) { const f = 0.3 + k * 0.4 + (rnd(i + 7 * k) - 0.5) * 0.15; ctx.beginPath(); if (horiz) { const x = o.x + s0 + pw * f; ctx.moveTo(x, o.y + 2); ctx.lineTo(x + (rnd(i + k) - 0.5) * 2, o.y + o.h - 2); } else { const y = o.y + s0 + pw * f; ctx.moveTo(o.x + 2, y); ctx.lineTo(o.x + o.w - 2, y + (rnd(i + k) - 0.5) * 2); } ctx.stroke(); }
-      // a knot on some planks, a crack on others
-      if (rnd(i + 13) > 0.8) { const kx = horiz ? o.x + s0 + pw / 2 : o.x + o.w * (0.3 + r2 * 0.4), ky = horiz ? o.y + o.h * (0.3 + r2 * 0.4) : o.y + s0 + pw / 2; ctx.fillStyle = "rgba(60,35,15,0.5)"; ctx.beginPath(); ctx.ellipse(kx, ky, 2.2, 1.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = "rgba(60,35,15,0.35)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.ellipse(kx, ky, 3.6, 2.6, 0, 0, Math.PI * 2); ctx.stroke(); }
-      if (rnd(i + 43) > 0.86) { ctx.strokeStyle = "rgba(20,12,5,0.7)"; ctx.lineWidth = 1; ctx.beginPath(); if (horiz) { const x = o.x + s0 + pw * 0.5; ctx.moveTo(x - 1, o.y + o.h * 0.15); ctx.lineTo(x + 1.5, o.y + o.h * 0.5); ctx.lineTo(x - 0.5, o.y + o.h * 0.9); } else { const y = o.y + s0 + pw * 0.5; ctx.moveTo(o.x + o.w * 0.15, y - 1); ctx.lineTo(o.x + o.w * 0.5, y + 1.5); ctx.lineTo(o.x + o.w * 0.9, y - 0.5); } ctx.stroke(); }
-      // nails at both ends (one occasionally missing)
-      ctx.fillStyle = "rgba(40,30,25,0.7)";
-      for (const e of [0.18, 0.82]) { if (rnd(i + 200 + e * 10) > 0.9) continue; const cx = horiz ? o.x + s0 + pw / 2 : o.x + o.w * e, cy = horiz ? o.y + o.h * e : o.y + s0 + pw / 2; ctx.beginPath(); ctx.arc(cx, cy, 1.1, 0, Math.PI * 2); ctx.fill(); }
-    }
-    // gaps between planks (water shows through)
-    ctx.strokeStyle = "rgba(10,25,35,0.55)"; ctx.lineWidth = 1.2;
-    for (let i = 1; i < nn; i++) { ctx.beginPath(); if (horiz) { const x = o.x + pw * i; ctx.moveTo(x, o.y); ctx.lineTo(x, o.y + o.h); } else { const y = o.y + pw * i; ctx.moveTo(o.x, y); ctx.lineTo(o.x + o.w, y); } ctx.stroke(); }
-    // moss along the shaded edge, lit near edge, dark far edge
-    ctx.fillStyle = "rgba(70,110,60,0.3)"; if (horiz) ctx.fillRect(o.x, o.y + o.h - 6, o.w, 6); else ctx.fillRect(o.x + o.w - 6, o.y, 6, o.h);
-    ctx.fillStyle = "rgba(255,225,185,0.45)"; ctx.fillRect(o.x, o.y, horiz ? o.w : 2.5, horiz ? 2.5 : o.h);
-    ctx.fillStyle = "rgba(20,10,4,0.5)"; if (horiz) ctx.fillRect(o.x, o.y + o.h - 3, o.w, 3); else ctx.fillRect(o.x + o.w - 3, o.y, 3, o.h);
-    // post tops above the deck, with a highlight
-    for (const [px, py] of posts) {
-      ctx.fillStyle = "#5a3a1c"; ctx.beginPath(); ctx.arc(px, py - 2, pr, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "#7d5330"; ctx.beginPath(); ctx.arc(px, py - 2, pr * 0.72, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "rgba(255,225,185,0.35)"; ctx.beginPath(); ctx.arc(px - pr * 0.25, py - 2 - pr * 0.25, pr * 0.3, 0, Math.PI * 2); ctx.fill();
-    }
-    // a mooring rope slung between the posts on the far side
-    if (!lowFx && posts.length >= 4) {
-      ctx.strokeStyle = "rgba(230,215,180,0.7)"; ctx.lineWidth = 1.4; ctx.lineCap = "round";
-      const far = posts.filter((_, i) => i % 2 === 1);
-      ctx.beginPath(); ctx.moveTo(far[0][0], far[0][1] - 2);
-      for (let i = 1; i < far.length; i++) { const [ax, ay] = far[i - 1], [bx, by] = far[i]; ctx.quadraticCurveTo((ax + bx) / 2 + (horiz ? 0 : 6), (ay + by) / 2 + (horiz ? 6 : 0), bx, by - 2); }
-      ctx.stroke(); ctx.lineCap = "butt";
-    }
-  }
-  function drawWhirl(z) {
-    const t = waveT, R = z.r;
-    ctx.save(); ctx.translate(z.x, z.y);
-    // the surface dips toward the hole: darker, deeper blue inward
-    const g = ctx.createRadialGradient(0, 0, R * 0.05, 0, 0, R);
-    g.addColorStop(0, "rgba(3,18,34,0.85)"); g.addColorStop(0.25, "rgba(8,40,66,0.55)"); g.addColorStop(0.7, "rgba(20,80,110,0.18)"); g.addColorStop(1, "rgba(30,100,130,0)");
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();
-    // spiral arms of foam winding inward
-    const arms = lowFx ? 2 : 4;
-    ctx.lineCap = "round";
-    for (let a = 0; a < arms; a++) {
-      ctx.beginPath();
-      for (let k = 0; k <= 40; k++) { const f = k / 40, rad = R * (0.12 + 0.88 * (1 - f)), ang = a * (Math.PI * 2 / arms) + t * 1.6 + f * 4.2; const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad * 0.92; k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
-      ctx.strokeStyle = "rgba(230,245,255,0.26)"; ctx.lineWidth = 3.5; ctx.stroke();
-      ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.2; ctx.stroke();
-    }
-    // broken foam ring at the edge, dark core with a lit rim, droplets flung around
-    ctx.setLineDash([14, 22]); ctx.lineDashOffset = -t * 40; ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.96, R * 0.9, 0, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = "#03111f"; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.14, R * 0.11, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(200,235,255,0.6)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.16, R * 0.13, 0, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
-    if (!lowFx) { ctx.fillStyle = "rgba(230,245,255,0.7)"; for (let i = 0; i < 6; i++) { const ang = t * 2.2 + i * 1.05; ctx.beginPath(); ctx.arc(Math.cos(ang) * R * 1.02, Math.sin(ang) * R * 0.95, 1.6, 0, Math.PI * 2); ctx.fill(); } }
-    ctx.restore(); ctx.lineCap = "butt";
-  }
-  function drawLivboj(x, y, r, hue, glow, label, you, stunned) {
-    const bob = Math.sin(waveT * 2.1 + x * 0.03) * 1.5, tilt = 1 - 0.03 * (0.5 + 0.5 * Math.sin(waveT * 1.4 + y * 0.02));
-    ctx.save(); ctx.translate(x, y);
-    // water contact: soft shadow under the ring and a ripple wake
-    if (!lowFx) {
-      ctx.fillStyle = "rgba(3,20,36,0.32)"; ctx.beginPath(); ctx.ellipse(r * 0.12, r * 0.22 + bob * 0.3, r * 1.02, r * 0.78, 0, 0, Math.PI * 2); ctx.fill();
-      const rip = (waveT * 0.9 + x * 0.01) % 1;
-      for (let k = 0; k < 2; k++) {
-        const f = (rip + k * 0.5) % 1;
-        ctx.strokeStyle = `rgba(200,235,255,${(1 - f) * (glow ? 0.5 : 0.28)})`; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.ellipse(0, r * 0.18, r * (1.12 + f * 0.75), r * (0.75 + f * 0.55), 0, 0, Math.PI * 2); ctx.stroke();
-      }
-    }
-    ctx.translate(0, bob); ctx.scale(1, tilt);
-    if (stunned) ctx.globalAlpha = 0.6 + 0.25 * Math.sin(waveT * 20);
-    // player colour: a soft glowing ring outside the rope
-    if (hue != null) { ctx.save(); ctx.shadowColor = `hsla(${hue},90%,65%,0.9)`; ctx.shadowBlur = 14; ctx.strokeStyle = `hsla(${hue},85%,62%,0.85)`; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, r + 8, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
-    const donut = () => { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2, true); };
-    // Today's Trygg-Hansa look: a clean orange torus with four white bands, no rope.
-    if (glow) { ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 22; }
-    // body: orange tube with four warm-white bands
-    donut(); ctx.fillStyle = "#ef5a1f"; ctx.fill("evenodd"); ctx.shadowBlur = 0;
-    ctx.fillStyle = "#f7f3e8";
-    for (let i = 0; i < 4; i++) { ctx.save(); ctx.rotate(i * Math.PI / 2 + Math.PI / 4); ctx.beginPath(); ctx.arc(0, 0, r, -0.32, 0.32); ctx.arc(0, 0, r * 0.55, 0.32, -0.32, true); ctx.closePath(); ctx.fill(); ctx.restore(); }
-    // tube shading: light from the top-left across the torus cross-section (dark inner lip, lit crest, dark outer edge)
-    const lx = -r * 0.16, ly = -r * 0.18;
-    const tube = ctx.createRadialGradient(lx, ly, r * 0.5, lx, ly, r * 1.08);
-    tube.addColorStop(0, "rgba(0,0,0,0.42)"); tube.addColorStop(0.16, "rgba(0,0,0,0.08)"); tube.addColorStop(0.38, "rgba(255,255,255,0.30)");
-    tube.addColorStop(0.62, "rgba(255,255,255,0.02)"); tube.addColorStop(0.86, "rgba(0,0,0,0.22)"); tube.addColorStop(1, "rgba(0,0,0,0.45)");
-    donut(); ctx.fillStyle = tube; ctx.fill("evenodd");
-    const dir = ctx.createLinearGradient(-r, -r, r, r);
-    dir.addColorStop(0, "rgba(255,255,255,0.16)"); dir.addColorStop(0.5, "rgba(255,255,255,0)"); dir.addColorStop(1, "rgba(0,0,0,0.28)");
-    donut(); ctx.fillStyle = dir; ctx.fill("evenodd");
-    // edges, specular hot spot on the crest, cool water reflection on the far rim
-    ctx.strokeStyle = "rgba(40,15,0,0.45)"; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = "rgba(40,15,0,0.55)"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.beginPath(); ctx.ellipse(-r * 0.5, -r * 0.5, r * 0.17, r * 0.08, -Math.PI / 4, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(150,215,245,0.45)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, r * 0.94, Math.PI * 0.12, Math.PI * 0.42); ctx.stroke();
-    if (label) { ctx.font = "700 14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.shadowColor = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 4; ctx.fillStyle = you ? "#ffd7c7" : "#eaf6ff"; ctx.fillText(you ? "Du" : label, 0, -r - 12); ctx.shadowBlur = 0; }
-    ctx.globalAlpha = 1;
-    if (stunned) { ctx.fillStyle = "#fdd23a"; ctx.font = "14px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; for (let i = 0; i < 3; i++) { const a = waveT * 4 + i * (Math.PI * 2 / 3); ctx.fillText("★", Math.cos(a) * r * 0.85, -r * 0.95 + Math.sin(a) * r * 0.22); } ctx.textBaseline = "alphabetic"; }
-    ctx.restore();
-  }
-  function drawHairTop(style, R, hair) {
-    // hairline at -0.45R, crown around -0.9R; the shape is a cap closed by a style-specific fringe
-    const top = -R * 0.92, side = R * 0.74, line = -R * 0.45;
-    ctx.fillStyle = hair; ctx.beginPath();
-    ctx.moveTo(-side, line);
-    ctx.bezierCurveTo(-side * 1.05, top, side * 1.05, top, side, line);
-    if (style === 0) { ctx.quadraticCurveTo(R * 0.5, -R * 0.62, R * 0.05, -R * 0.5); ctx.quadraticCurveTo(-R * 0.35, -R * 0.36, -side, line); } // side-swept fringe
-    else if (style === 2) { ctx.lineTo(side, line + R * 0.08); ctx.lineTo(-side, line + R * 0.08); } // straight bangs
-    else if (style === 3) { ctx.lineTo(-side, line); } // spiky: spikes added below
-    else { ctx.quadraticCurveTo(0, -R * 0.58, -side, line); } // rounded fringe
-    ctx.closePath(); ctx.fill();
-    if (style === 1) shadedBall(0, -R * 0.88, R * 0.3, hair); // bun
-    if (style === 3) { ctx.fillStyle = hair; for (let k = -2; k <= 2; k++) { const a = k * R * 0.3; ctx.beginPath(); ctx.moveTo(a - R * 0.16, -R * 0.7); ctx.lineTo(a + k * R * 0.06, -R * 1.12); ctx.lineTo(a + R * 0.16, -R * 0.7); ctx.closePath(); ctx.fill(); } }
-    if (style === 4) { shadedBall(-R * 0.82, R * 0.12, R * 0.27, hair); shadedBall(R * 0.82, R * 0.12, R * 0.27, hair); } // pigtails
-    // wet strands (a touch lighter than the hair) + sheen
-    ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = 1.1; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(-R * 0.35, -R * 0.66); ctx.quadraticCurveTo(-R * 0.1, -R * 0.84, R * 0.25, -R * 0.72); ctx.moveTo(R * 0.15, -R * 0.56); ctx.quadraticCurveTo(R * 0.4, -R * 0.7, R * 0.55, -R * 0.52); ctx.stroke(); ctx.lineCap = "butt";
-    ctx.fillStyle = "rgba(255,255,255,0.22)"; ctx.beginPath(); ctx.ellipse(-R * 0.25, -R * 0.68, R * 0.26, R * 0.08, -0.45, 0, Math.PI * 2); ctx.fill();
-  }
-  // A shaded sphere (light from top-left) — the building block for the 3D look.
-  function shadedBall(x, y, r, col) {
-    if (lowFx) { // cheap fallback: flat fill + a single highlight ellipse
-      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.beginPath(); ctx.ellipse(x - r * 0.3, y - r * 0.35, r * 0.42, r * 0.28, 0, 0, Math.PI * 2); ctx.fill();
-      return;
-    }
-    const g = ctx.createRadialGradient(x - r * 0.38, y - r * 0.42, r * 0.12, x, y, r * 1.05);
-    g.addColorStop(0, hi(col)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col));
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  // Same shading on an ellipse — heads and bodies aren't spheres.
-  function shadedEllipse(x, y, rx, ry, col, rot = 0) {
-    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(rx, ry);
-    if (lowFx) ctx.fillStyle = col;
-    else { const g = ctx.createRadialGradient(-0.38, -0.42, 0.1, 0, 0, 1.05); g.addColorStop(0, hi(col)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col)); ctx.fillStyle = g; }
-    ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  }
-  function drawSwimmer(s) {
-    const R = s.r, bob = Math.sin(s.bob || 0), t = s.bob || 0, id = s.id || 0;
-    const frac = s.frac != null ? s.frac : Math.max(0, s.life / s.maxLife);
-    const skin = SKINS[s.sk % SKINS.length], hair = HAIRS[s.hr % HAIRS.length];
-    const suit = SUITS[id % SUITS.length], ph = id * 1.7, style = id % 5;
-    const cap = id % 7 === 3, goggles = !cap && id % 5 === 4, freckles = id % 3 === 0;
-    const eyeCol = ["#3b6ea5", "#5a3a22", "#3f7a4a", "#2a2320"][id % 4];
-
-    ctx.save(); ctx.translate(s.x, s.y + bob * 2.6); ctx.rotate(bob * 0.06);
-
-    // ambient occlusion / soft cast shadow into the water
-    if (lowFx) { ctx.fillStyle = "rgba(0,18,32,0.2)"; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.3, R * 0.8, 0, 0, Math.PI * 2); ctx.fill(); }
-    else { const ao = ctx.createRadialGradient(0, R * 0.55, R * 0.2, 0, R * 0.55, R * 1.7); ao.addColorStop(0, "rgba(0,18,32,0.3)"); ao.addColorStop(1, "rgba(0,18,32,0)"); ctx.fillStyle = ao; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.55, R * 0.92, 0, 0, Math.PI * 2); ctx.fill(); }
-
-    // ripples
-    for (let k = 0; k < 3; k++) {
-      const rp = ((t * 0.3 + ph + k * 0.4) % 1 + 1) % 1;
-      ctx.strokeStyle = `rgba(205,232,246,${0.24 * (1 - rp)})`; ctx.lineWidth = 1.4;
-      ctx.beginPath(); ctx.ellipse(0, 7, R * (1.0 + rp * 1.8), R * (0.5 + rp * 0.9), 0, 0, Math.PI * 2); ctx.stroke();
-    }
-    // sink-time gauge: faint track, soft glow, crisp arc, bright tip
-    const hue = 120 * frac, a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * frac, gr = R + 10;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = `hsla(${hue},85%,60%,0.22)`; ctx.lineWidth = 7; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
-    ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
-    ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
-    ctx.lineCap = "butt";
-    // danger ring: a monster is holding this swimmer — rises red until eaten
-    const ch = s.ch != null ? s.ch : Math.min(1, (s.chomp || 0) / EAT_DWELL);
-    if (ch > 0) { ctx.strokeStyle = `rgba(255,70,60,${0.35 + 0.45 * ch})`; ctx.lineWidth = 2 + 4 * ch; ctx.beginPath(); ctx.arc(0, 0, gr + 6 + Math.sin(t * 14) * 1.5 * ch, 0, Math.PI * 2); ctx.stroke(); }
-
-    // --- submerged: kicking legs, refracted and water-tinted ---
-    const refr = Math.sin(t * 2) * R * 0.06, kick = Math.sin(t * 2.2);
-    ctx.globalAlpha = 0.42; ctx.strokeStyle = skin; ctx.lineWidth = 4.5; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(-R * 0.25 + refr, R * 1.05); ctx.lineTo(-R * 0.34 + refr, R * 1.65 + kick * 5); ctx.moveTo(R * 0.25 + refr, R * 1.05); ctx.lineTo(R * 0.34 + refr, R * 1.65 - kick * 5); ctx.stroke();
-    ctx.globalAlpha = 1; ctx.lineCap = "butt";
-    // torso in the swimsuit, mostly under the surface
-    const tx = refr * 0.6;
-    shadedEllipse(tx, R * 0.9, R * 0.64, R * 0.6, suit);
-    ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(tx - R * 0.3, R * 0.5); ctx.quadraticCurveTo(tx, R * 0.72, tx + R * 0.3, R * 0.5); ctx.stroke(); // neckline
-    ctx.globalAlpha = 0.28; ctx.fillStyle = "#1f6f9e"; ctx.beginPath(); ctx.ellipse(tx, R * 1.05, R * 0.9, R * 0.62, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; // water depth tint
-    ctx.strokeStyle = "rgba(230,248,255,0.55)"; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.ellipse(tx, R * 0.66, R * 0.8, R * 0.2, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke(); // waterline foam
-
-    // neck (in the chin's shadow) and shoulder line
-    ctx.fillStyle = shade(skin); ctx.beginPath(); ctx.roundRect(-R * 0.18, R * 0.3, R * 0.36, R * 0.32, R * 0.08); ctx.fill();
-    shadedEllipse(0, R * 0.56, R * 0.64, R * 0.24, skin);
-
-    // arms: shoulder -> elbow -> open hand, waving above the water
-    const swL = Math.sin(t * 1.8), swR = Math.sin(t * 1.8 + Math.PI);
-    const hand = [];
-    const arm = (sgn, sw) => {
-      const sx = sgn * R * 0.56, sy = R * 0.46;            // shoulder
-      const ex = sgn * R * 1.12, ey = R * 0.08 + sw * 3;    // elbow
-      const hx = sgn * R * 1.28, hy = -R * 0.5 + sw * 6;    // hand
-      hand.push([hx, hy]);
-      ctx.lineCap = "round"; ctx.lineJoin = "round";
-      ctx.strokeStyle = shade(skin); ctx.lineWidth = 6.6; ctx.beginPath(); ctx.moveTo(sx, sy + 1.2); ctx.lineTo(ex, ey + 1.2); ctx.lineTo(hx, hy + 1.2); ctx.stroke();
-      ctx.strokeStyle = skin; ctx.lineWidth = 5.4; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-      ctx.lineWidth = 4.6; ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(hx, hy); ctx.stroke();
-      ctx.lineCap = "butt";
-      shadedEllipse(hx, hy - 1, 4.2, 4.8, skin); // palm
-      if (!lowFx) { // fingers + thumb
-        ctx.fillStyle = skin;
-        for (let f = -1; f <= 1; f++) { ctx.beginPath(); ctx.ellipse(hx + f * 2.6 + sgn * 0.4, hy - 5.6 - (f === 0 ? 1 : 0), 1.3, 2.4, f * 0.25, 0, Math.PI * 2); ctx.fill(); }
-        ctx.beginPath(); ctx.ellipse(hx - sgn * 4.4, hy - 1.5, 1.3, 2.2, -sgn * 0.9, 0, Math.PI * 2); ctx.fill();
-      }
-    };
-    arm(-1, swL); arm(1, swR);
-    // glossy droplets flung from the hands
-    for (let k = 0; k < 2; k++) { const dp = ((t * 0.5 + ph + k) % 1 + 1) % 1, dr = 2.3 * (1 - dp); if (dr > 0.5) { ctx.fillStyle = "rgba(215,240,251,0.9)"; for (const [hx, hy] of hand) { ctx.beginPath(); ctx.arc(hx, hy - 6 - dp * 15, dr, 0, Math.PI * 2); ctx.fill(); } } }
-
-    // --- head: an oval with a chin, not a ball ---
-    if (style === 2 && !cap) { // long hair: a mass behind the head that ends at the jaw, and two falls beside it
-      shadedEllipse(0, -R * 0.05, R * 0.9, R * 0.85, hair);
-      shadedEllipse(-R * 0.8, R * 0.38, R * 0.2, R * 0.5, hair, -0.1); shadedEllipse(R * 0.8, R * 0.38, R * 0.2, R * 0.5, hair, 0.1);
-    }
-    shadedEllipse(-R * 0.72, R * 0.02, R * 0.13, R * 0.17, skin); shadedEllipse(R * 0.72, R * 0.02, R * 0.13, R * 0.17, skin); // ears
-    shadedEllipse(0, 0, R * 0.72, R * 0.84, skin);
-    ctx.fillStyle = "rgba(90,50,30,0.09)"; ctx.beginPath(); ctx.ellipse(0, R * 0.7, R * 0.3, R * 0.1, 0, 0, Math.PI); ctx.fill(); // faint chin shadow
-    // waterline meniscus where the chin meets the water
-    ctx.strokeStyle = "rgba(222,245,255,0.5)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(0, R * 0.72, R * 0.62, R * 0.16, 0, 0, Math.PI, false); ctx.stroke();
-    // cheeks + freckles
-    ctx.fillStyle = "rgba(240,120,110,0.28)"; ctx.beginPath(); ctx.ellipse(-R * 0.4, R * 0.22, R * 0.16, R * 0.11, 0, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(R * 0.4, R * 0.22, R * 0.16, R * 0.11, 0, 0, Math.PI * 2); ctx.fill();
-    if (freckles && !lowFx) { ctx.fillStyle = "rgba(120,70,40,0.3)"; for (const [fx, fy] of [[-0.44, 0.1], [-0.34, 0.16], [-0.5, 0.18], [0.44, 0.1], [0.34, 0.16], [0.5, 0.18]]) { ctx.beginPath(); ctx.arc(fx * R, fy * R, 0.55, 0, Math.PI * 2); ctx.fill(); } } // faint, high on the cheeks (lower they read as stubble)
-    // hair or a swim cap; some wear goggles pushed up on the forehead
-    if (cap) {
-      shadedEllipse(0, -R * 0.34, R * 0.74, R * 0.58, ["#ff7aa8", "#ffd23a", "#2dd4bf"][id % 3]); // bright caps (white read as a bald head)
-      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.ellipse(0, -R * 0.1, R * 0.72, R * 0.26, 0, Math.PI * 0.06, Math.PI * 0.94, true); ctx.stroke();
-    } else drawHairTop(style, R, hair);
-    if (goggles && !lowFx) {
-      ctx.strokeStyle = "#1c1c1c"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.ellipse(0, -R * 0.44, R * 0.72, R * 0.14, 0, Math.PI * 1.08, Math.PI * 1.92); ctx.stroke(); // strap
-      for (const gx of [-R * 0.27, R * 0.27]) { ctx.fillStyle = "#1c1c1c"; ctx.beginPath(); ctx.ellipse(gx, -R * 0.56, R * 0.2, R * 0.12, 0, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "rgba(120,200,240,0.85)"; ctx.beginPath(); ctx.ellipse(gx, -R * 0.56, R * 0.15, R * 0.08, 0, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.beginPath(); ctx.ellipse(gx - R * 0.05, -R * 0.59, R * 0.05, R * 0.025, -0.5, 0, Math.PI * 2); ctx.fill(); }
-    }
-    // brows: worried arch
-    const brow = -R * 0.28 - Math.abs(bob) * 1.2;
-    ctx.strokeStyle = "rgba(60,38,26,0.8)"; ctx.lineWidth = 1.5; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(-R * 0.46, brow + 3); ctx.quadraticCurveTo(-R * 0.3, brow - 3, -R * 0.12, brow); ctx.moveTo(R * 0.12, brow); ctx.quadraticCurveTo(R * 0.3, brow - 3, R * 0.46, brow + 3); ctx.stroke(); ctx.lineCap = "butt";
-    // eyes: whites, coloured iris, pupil, catchlight, upper lid
-    const blink = Math.sin(t * 0.9 + id * 1.3) > 0.94;
-    for (const ex of [-R * 0.28, R * 0.28]) {
-      if (blink) { ctx.strokeStyle = "#2a2320"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(ex - R * 0.12, -R * 0.02); ctx.lineTo(ex + R * 0.12, -R * 0.02); ctx.stroke(); continue; }
-      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.ellipse(ex, -R * 0.02, R * 0.14, R * 0.17, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = eyeCol; ctx.beginPath(); ctx.arc(ex + R * 0.02, -R * 0.03, R * 0.085, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "#151210"; ctx.beginPath(); ctx.arc(ex + R * 0.02, -R * 0.03, R * 0.045, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.beginPath(); ctx.arc(ex - R * 0.02, -R * 0.08, R * 0.035, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(60,35,25,0.6)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(ex, -R * 0.02, R * 0.14, R * 0.17, 0, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
-    }
-    // nose
-    ctx.strokeStyle = "rgba(120,80,60,0.55)"; ctx.lineWidth = 1.4; ctx.lineCap = "round"; ctx.beginPath(); ctx.moveTo(-R * 0.02, R * 0.08); ctx.quadraticCurveTo(-R * 0.1, R * 0.24, R * 0.03, R * 0.27); ctx.stroke(); ctx.lineCap = "butt";
-    // mouth: shouting — lips, dark inside, upper teeth, tongue
-    const gape = R * 0.12 + (Math.sin(t * 3) + 1) * R * 0.09, mw = R * 0.16 + gape * 0.25, my = R * 0.5;
-    ctx.fillStyle = "#b34a44"; ctx.beginPath(); ctx.ellipse(0, my, mw + 1.4, gape + 1.4, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#5a2020"; ctx.beginPath(); ctx.ellipse(0, my, mw, gape, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.ellipse(0, my, mw, gape, 0, 0, Math.PI * 2); ctx.clip();
-    ctx.fillStyle = "#f7f3ea"; ctx.fillRect(-mw, my - gape - 1, mw * 2, gape * 0.5);
-    ctx.fillStyle = "#d9605a"; ctx.beginPath(); ctx.ellipse(0, my + gape * 0.75, mw * 0.7, gape * 0.5, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-    // rim light + specular on the head
-    ctx.strokeStyle = "rgba(255,255,255,0.22)"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.7, R * 0.82, 0, Math.PI * 1.06, Math.PI * 1.5); ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.22)"; ctx.beginPath(); ctx.ellipse(-R * 0.3, -R * 0.2, R * 0.14, R * 0.09, -0.6, 0, Math.PI * 2); ctx.fill();
-    // panic bubble
-    const bpp = ((t * 0.4 + id) % 1 + 1) % 1;
-    if (bpp < 0.5) { ctx.strokeStyle = "rgba(210,238,250,0.6)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(R * 0.6, -R * 0.8 - bpp * R, 1.5 + bpp * 2, 0, Math.PI * 2); ctx.stroke(); }
-
-    ctx.restore();
-  }
-  function drawSplash(sp) { const p = sp.t / 0.6; ctx.strokeStyle = sp.good ? `rgba(120,230,160,${1 - p})` : `rgba(230,120,120,${1 - p})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(sp.x, sp.y, 6 + p * 26, 0, Math.PI * 2); ctx.stroke(); }
-  function drawMonster(m) {
-    const R = m.r || 30, t = m.wob || 0, sub = m.sub || 0;
-    // eased turn instead of a snap flip; the nose dips or rises with the heading; a diving beast sinks and fades
-    const faceWant = Math.cos(m.dir || 0) < 0 ? -1 : 1;
-    m.face = m.face === undefined ? faceWant : m.face + (faceWant - m.face) * 0.1;
-    const pitch = -Math.sin(m.dir || 0) * 0.3 * Math.sign(m.face || 1), bob = Math.sin(t) * 2 + sub * R * 0.5;
-    ctx.save(); ctx.translate(m.x, m.y);
-    if (sub > 0.15) { // surface disturbance where it went under
-      ctx.strokeStyle = `rgba(220,242,250,${0.4 * sub})`; ctx.lineWidth = 2;
-      for (let k = 0; k < 3; k++) { const f = ((t * 0.35 + k / 3) % 1); ctx.globalAlpha = (1 - f) * sub; ctx.beginPath(); ctx.ellipse(0, R * 0.3, R * (0.6 + f * 1.6), R * (0.25 + f * 0.7), 0, 0, Math.PI * 2); ctx.stroke(); }
-      ctx.globalAlpha = sub; ctx.fillStyle = "rgba(222,242,250,0.6)"; for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.arc(Math.sin(t * 1.3 + k * 2) * R * 0.8, R * 0.25 + Math.cos(t * 0.9 + k) * R * 0.3, 1.5 + (k % 2), 0, Math.PI * 2); ctx.fill(); }
-    }
-    ctx.globalAlpha = 1 - sub * 0.8;
-    ctx.translate(0, bob); ctx.scale(m.face, 1 - sub * 0.4); ctx.rotate(pitch * 0.35);
-    const dark = "#1f4f2b", mid = "#3f8f4a", light = "#6cc276", belly = "#bfd98f";
-    const body = ctx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.2, -R * 0.15, 0, R * 1.7);
-    body.addColorStop(0, light); body.addColorStop(0.5, mid); body.addColorStop(1, "#245f35");
-    // ambient occlusion + wake (a V of foam trailing behind, drifting bubbles)
-    const mao = ctx.createRadialGradient(-R * 0.2, R * 0.5, R * 0.3, -R * 0.2, R * 0.5, R * 2.2);
-    mao.addColorStop(0, "rgba(0,18,32,0.3)"); mao.addColorStop(1, "rgba(0,18,32,0)");
-    ctx.fillStyle = mao; ctx.beginPath(); ctx.ellipse(-R * 0.2, R * 0.55, R * 2.0, R * 0.95, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(220,242,250,0.35)"; ctx.lineWidth = 2; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, R * 0.9, -R * 2.9, R * 1.05 + Math.sin(t * 2) * 3); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, -R * 0.2, -R * 2.9, -R * 0.35 + Math.sin(t * 2 + 1) * 3); ctx.stroke();
-    ctx.fillStyle = "rgba(222,242,250,0.45)";
-    for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(-R * 1.5 - i * R * 0.4, R * 0.45 + Math.sin(t * 2 + i) * 4, 3 - i * 0.45, 0, Math.PI * 2); ctx.fill(); }
-    // waterline ring where the body breaks the surface
-    ctx.strokeStyle = "rgba(230,248,255,0.5)"; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.42, R * 1.15, R * 0.28, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke();
-
-    // tail: tapering S-curve ending in a fluke
-    const tw = Math.sin(t * 2.2 - 3.6) * R * 0.24; // the same wave, further down the body
-    ctx.strokeStyle = body; ctx.lineCap = "round";
-    ctx.lineWidth = R * 0.34; ctx.beginPath(); ctx.moveTo(-R * 1.1, R * 0.05); ctx.quadraticCurveTo(-R * 1.7, -R * 0.1 + tw, -R * 2.05, -R * 0.3 + tw * 0.6); ctx.stroke();
-    ctx.lineWidth = R * 0.18; ctx.beginPath(); ctx.moveTo(-R * 2.0, -R * 0.3 + tw * 0.6); ctx.quadraticCurveTo(-R * 2.3, -R * 0.55 + tw, -R * 2.45, -R * 0.75 + tw * 0.8); ctx.stroke();
-    ctx.fillStyle = dark; ctx.beginPath(); const fx = -R * 2.45, fy = -R * 0.75 + tw * 0.8; // fluke
-    ctx.moveTo(fx, fy); ctx.quadraticCurveTo(fx - R * 0.35, fy - R * 0.45, fx - R * 0.15, fy - R * 0.6); ctx.quadraticCurveTo(fx + R * 0.05, fy - R * 0.25, fx + R * 0.2, fy - R * 0.05); ctx.quadraticCurveTo(fx + R * 0.1, fy + R * 0.3, fx - R * 0.25, fy + R * 0.32); ctx.closePath(); ctx.fill();
-
-    // back humps with a serrated dorsal ridge, each hump shaded and scaled
-    for (let i = 0; i < 3; i++) {
-      const hx = -R * 1.15 + i * R * 0.6, hy = Math.sin(t * 2.2 - i * 1.1) * R * 0.16, hr = R * 0.42 - i * 2; // a wave travelling down the back
-      ctx.fillStyle = dark; for (let k = -1; k <= 1; k++) { const sx = hx + k * hr * 0.42; ctx.beginPath(); ctx.moveTo(sx - hr * 0.2, hy - hr * 0.8); ctx.lineTo(sx, hy - hr * 1.28 + Math.abs(k) * hr * 0.15); ctx.lineTo(sx + hr * 0.2, hy - hr * 0.8); ctx.closePath(); ctx.fill(); }
-      ctx.fillStyle = body; ctx.beginPath(); ctx.arc(hx, hy, hr, Math.PI, 0); ctx.fill();
-      ctx.strokeStyle = "rgba(20,60,30,0.35)"; ctx.lineWidth = 1; for (let row = 0; row < 2; row++) for (let k = -2; k <= 2; k++) { ctx.beginPath(); ctx.arc(hx + k * hr * 0.36 + (row % 2) * hr * 0.18, hy - hr * 0.25 - row * hr * 0.3, hr * 0.18, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); } // scales
-      ctx.fillStyle = "rgba(255,255,255,0.14)"; ctx.beginPath(); ctx.ellipse(hx - hr * 0.25, hy - hr * 0.45, hr * 0.4, hr * 0.18, -0.3, 0, Math.PI * 2); ctx.fill();
-    }
-
-    // main body: shaded, with scale rows, a pale plated belly, rim light, and two flippers
-    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.98, R * 0.58, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.98, R * 0.58, 0, 0, Math.PI * 2); ctx.clip();
-    ctx.strokeStyle = "rgba(20,60,30,0.32)"; ctx.lineWidth = 1;
-    for (let row = 0; row < 4; row++) for (let k = -5; k <= 4; k++) { const sx = -R * 0.15 + k * R * 0.2 + (row % 2) * R * 0.1, sy = -R * 0.35 + row * R * 0.17; ctx.beginPath(); ctx.arc(sx, sy, R * 0.1, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke(); }
-    ctx.fillStyle = belly; ctx.beginPath(); ctx.ellipse(-R * 0.1, R * 0.34, R * 0.78, R * 0.3, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(90,110,60,0.45)"; ctx.lineWidth = 1; for (let k = -3; k <= 3; k++) { const sx = -R * 0.1 + k * R * 0.2; ctx.beginPath(); ctx.moveTo(sx, R * 0.12); ctx.lineTo(sx, R * 0.6); ctx.stroke(); } // belly plates
-    ctx.restore();
-    ctx.strokeStyle = "rgba(200,255,210,0.25)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.02, R * 0.96, R * 0.56, 0, Math.PI * 1.12, Math.PI * 1.96); ctx.stroke(); // rim light
-    ctx.fillStyle = "rgba(255,255,255,0.16)"; ctx.beginPath(); ctx.ellipse(-R * 0.45, -R * 0.25, R * 0.4, R * 0.16, -0.4, 0, Math.PI * 2); ctx.fill(); // specular
-    const flap = Math.sin(t * 2) * R * 0.12;
-    ctx.fillStyle = "#2b6b3a"; ctx.beginPath(); ctx.moveTo(-R * 0.05, R * 0.3); ctx.quadraticCurveTo(-R * 0.45, R * 0.98 + flap, -R * 0.7, R * 0.72); ctx.quadraticCurveTo(-R * 0.35, R * 0.5, -R * 0.05, R * 0.3); ctx.fill(); // near flipper
-    ctx.fillStyle = "#245f35"; ctx.beginPath(); ctx.moveTo(-R * 0.75, R * 0.2); ctx.quadraticCurveTo(-R * 1.1, R * 0.7 - flap, -R * 1.3, R * 0.5); ctx.quadraticCurveTo(-R * 1.0, R * 0.35, -R * 0.75, R * 0.2); ctx.fill(); // rear flipper
-    ctx.strokeStyle = "rgba(20,60,30,0.4)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(-R * 0.2, R * 0.42); ctx.lineTo(-R * 0.55, R * 0.72); ctx.moveTo(-R * 0.3, R * 0.4); ctx.lineTo(-R * 0.66, R * 0.62); ctx.stroke(); // flipper bones
-
-    // neck: thick S-curve with a pale throat and ridge spikes
-    const sway = Math.sin(t * 1.2) * R * 0.08;
-    ctx.strokeStyle = body; ctx.lineWidth = R * 0.46; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(R * 0.35, R * 0.02); ctx.quadraticCurveTo(R * 0.85 + sway, -R * 0.7, R * 0.98 + sway, -R * 1.05); ctx.stroke();
-    ctx.strokeStyle = belly; ctx.lineWidth = R * 0.16; ctx.beginPath(); ctx.moveTo(R * 0.5, R * 0.1); ctx.quadraticCurveTo(R * 0.98 + sway, -R * 0.62, R * 1.08 + sway, -R * 0.98); ctx.stroke(); // throat
-    ctx.strokeStyle = "rgba(90,110,60,0.4)"; ctx.lineWidth = 1; for (let i = 0; i < 5; i++) { const nt = 0.15 + i * 0.17, nx = R * (0.5 + nt * 0.58) + sway * nt, ny = R * (0.1 - 1.08 * nt * nt); ctx.beginPath(); ctx.moveTo(nx - R * 0.07, ny); ctx.lineTo(nx + R * 0.07, ny + R * 0.02); ctx.stroke(); } // throat rings
-    ctx.fillStyle = dark;
-    for (let i = 0; i < 4; i++) { const nt = 0.3 + i * 0.18, nx = R * (0.32 + nt * 0.58) + sway * nt, ny = R * (-0.1 - 1.05 * nt * nt); ctx.beginPath(); ctx.moveTo(nx - 3.5, ny); ctx.lineTo(nx - 0.5, ny - 7); ctx.lineTo(nx + 3, ny); ctx.closePath(); ctx.fill(); }
-
-    // head: brow ridge, nostrils, jaws with gums, teeth top and bottom, tongue, slit-pupil eye, ear frill
-    ctx.save(); ctx.translate(R * 1.02 + sway, -R * 1.08); ctx.rotate(-0.35 + pitch);
-    const gape = (Math.sin(t * 3) + 1) / 2 * R * 0.18 + 1.5;
-    // lower jaw (opens downward)
-    ctx.save(); ctx.translate(R * 0.18, R * 0.12); ctx.rotate(gape / R * 1.6);
-    ctx.fillStyle = "#2f7a3e"; ctx.beginPath(); ctx.ellipse(R * 0.2, R * 0.05, R * 0.26, R * 0.1, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#7a1f22"; ctx.beginPath(); ctx.ellipse(R * 0.2, R * 0.02, R * 0.22, R * 0.06, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#c8615a"; ctx.beginPath(); ctx.ellipse(R * 0.14, R * 0.03, R * 0.1, R * 0.035, 0, 0, Math.PI * 2); ctx.fill(); // tongue
-    ctx.fillStyle = "#fff"; for (let i = 0; i < 3; i++) { const tx = R * 0.1 + i * R * 0.1; ctx.beginPath(); ctx.moveTo(tx, R * 0.0); ctx.lineTo(tx + 2.6, R * 0.0); ctx.lineTo(tx + 1.3, -3); ctx.closePath(); ctx.fill(); }
-    ctx.restore();
-    // upper head + snout
-    ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.44, R * 0.31, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(R * 0.36, R * 0.04, R * 0.23, R * 0.15, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#7a1f22"; ctx.beginPath(); ctx.moveTo(R * 0.16, R * 0.12); ctx.lineTo(R * 0.58, R * 0.1); ctx.lineTo(R * 0.56, R * 0.15); ctx.lineTo(R * 0.16, R * 0.17); ctx.closePath(); ctx.fill(); // upper gum
-    ctx.fillStyle = "#fff"; for (let i = 0; i < 4; i++) { const tx = R * 0.22 + i * R * 0.09; ctx.beginPath(); ctx.moveTo(tx, R * 0.13); ctx.lineTo(tx + 3, R * 0.13); ctx.lineTo(tx + 1.5, R * 0.13 + 4); ctx.closePath(); ctx.fill(); }
-    ctx.fillStyle = "#173d20"; ctx.beginPath(); ctx.ellipse(R * 0.5, -R * 0.02, 2, 1.3, 0.3, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.ellipse(R * 0.44, -R * 0.06, 1.6, 1.1, 0.3, 0, Math.PI * 2); ctx.fill(); // nostrils
-    ctx.fillStyle = "rgba(255,255,255,0.14)"; ctx.beginPath(); ctx.ellipse(-R * 0.1, -R * 0.14, R * 0.2, R * 0.08, -0.2, 0, Math.PI * 2); ctx.fill(); // head sheen
-    ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(-R * 0.08, -R * 0.24); ctx.lineTo(0, -R * 0.46); ctx.lineTo(R * 0.1, -R * 0.2); ctx.closePath(); ctx.fill(); // crest
-    ctx.fillStyle = "#2b6b3a"; ctx.beginPath(); ctx.moveTo(-R * 0.3, -R * 0.1); ctx.quadraticCurveTo(-R * 0.6, -R * 0.35, -R * 0.62, -R * 0.02); ctx.quadraticCurveTo(-R * 0.5, R * 0.1, -R * 0.3, R * 0.02); ctx.closePath(); ctx.fill(); // ear frill
-    // eye: brow ridge, yellow sclera, slit pupil, catchlight
-    ctx.fillStyle = dark; ctx.beginPath(); ctx.ellipse(R * 0.06, -R * 0.14, R * 0.17, R * 0.06, -0.15, Math.PI, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#fdd23a"; ctx.beginPath(); ctx.ellipse(R * 0.06, -R * 0.04, R * 0.15, R * 0.12, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#111"; ctx.beginPath(); ctx.ellipse(R * 0.09, -R * 0.04, R * 0.04, R * 0.1, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.beginPath(); ctx.arc(R * 0.12, -R * 0.09, 1.8, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-
-    // drips falling off the neck
-    if (!lowFx) { ctx.fillStyle = "rgba(215,240,251,0.8)"; for (let k = 0; k < 2; k++) { const dp = ((t * 0.45 + k * 0.5) % 1 + 1) % 1; ctx.beginPath(); ctx.arc(R * 0.75 + sway * 0.6, -R * 0.55 + dp * R * 0.9, 1.8 * (1 - dp * 0.6), 0, Math.PI * 2); ctx.fill(); } }
-    ctx.restore(); ctx.lineCap = "butt";
-  }
-  // HiDPI backing store: draw in logical CW×CH coords but back the canvas with
-  // (displayed size × devicePixelRatio) pixels so text and edges stay crisp.
-  // Capped so a big retina screen doesn't melt: pixel ratio at most 2 on
-  // desktop and 1.5 on phones/tablets, and at most MAX_BACK_W pixels wide.
-  // Checked every frame (cheap), so it follows resizes, fullscreen, a window
-  // moved to another screen and the cap itself changing.
-  let backK = 1;
-  const MAX_BACK_W = 2560, coarseMQ = matchMedia("(pointer: coarse)");
-  function fitBacking() {
-    const cw = canvas.clientWidth;
-    if (!cw) return;
-    const k = Math.min(window.devicePixelRatio || 1, coarseMQ.matches ? 1.5 : 2, MAX_BACK_W / cw);
-    const w = Math.max(1, Math.round(cw * k)), h = Math.round(w * CH / CW);
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-    backK = canvas.width / CW;
-  }
-  function resetBase() { ctx.setTransform(backK, 0, 0, backK, 0, 0); }
-
-  function render() {
-    resetBase(); ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH);
-    const v = currentView();
-    if (!v) { drawWaitScreen("Ansluter…"); return; }
-    if (v.phase === Phase.LOBBY) { drawLobbyScreen(v); return; }
-    const f = fit(v.world.w, v.world.h);
-    ctx.setTransform(backK * f.s, 0, 0, backK * f.s, backK * f.ox, backK * f.oy);
-    drawWater(v.world.w, v.world.h, waveT);
-    for (const z of v.swamps || []) drawSwamp(z);
-    for (const z of v.whirls || []) drawWhirl(z);
-    drawShore(v.world.w, v.world.h);
-    drawScenery(v.world.w, v.world.h);
-    for (const o of v.obstacles) drawBrygga(o);
-    lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
-    for (const s of v.swimmers) drawSwimmer(s);
-    for (const m of v.monsters || []) drawMonster(m);
-    for (const sv of saved) drawSaved(sv);
-    if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
-    for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
-    drawSeagulls(v.world.w, waveT);
-    resetBase();
-    drawHUD(v); drawScoreboard(v); drawOverlays(v); drawQuitBtn(v); drawMute();
-  }
-  function drawWaitScreen(msg) {
-    drawNetLine();
-    drawLivboj(CW / 2, CH / 2 - 30, 46, null, true, null, false);
-    ctx.fillStyle = "#eaf6ff"; ctx.textAlign = "center"; ctx.font = "800 30px system-ui, sans-serif"; ctx.fillText("Livbojen", CW / 2, CH / 2 + 40);
-    ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(msg, CW / 2, CH / 2 + 74);
-    drawMute();
-  }
-  function drawLobbyScreen(v) {
-    drawLivboj(CW / 2, CH / 2 - 96, 38, null, true, null, false);
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#eaf6ff"; ctx.font = "800 26px system-ui, sans-serif"; ctx.fillText("Lobby", CW / 2, CH / 2 - 34);
-    ctx.font = "500 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2";
-    if (authoritative) drawActionButton("Starta spelet", CW / 2, CH / 2 - 8);
-    else ctx.fillText("Väntar på att värden startar…", CW / 2, CH / 2 - 8);
-    const names = (v.players || []).map((p) => (p.id === selfId ? myName + " (du)" : (p.name || "Spelare")));
-    ctx.font = "700 16px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(`${names.length} spelare i lobbyn`, CW / 2, CH / 2 + 22);
-    ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
-    let y = CH / 2 + 46; for (const nm of names.slice(0, 12)) { ctx.fillText(nm, CW / 2, y); y += 20; }
-    drawNetLine();
-    drawMute();
-  }
-  function drawHUD(v) {
-    ctx.textAlign = "left"; ctx.font = "700 20px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
-    ctx.fillText(`Nivå ${v.hud.level + 1}/${BASE_LEVELS.length}`, 18, 30);
-    ctx.font = "600 14px system-ui, sans-serif"; ctx.fillStyle = "#ffd7c7"; ctx.fillText(`Missade ${v.hud.missed}/${v.hud.allowedMisses}`, 18, 52);
-    ctx.textAlign = "center"; ctx.font = "700 20px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff"; ctx.fillText(`Räddade ${v.hud.caught} / ${v.hud.quota}`, CW / 2, 30);
-    ctx.font = "600 14px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(`${v.hud.n} spelare`, CW / 2, 52);
-    ctx.textAlign = "right"; ctx.font = "800 22px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText(`Din poäng ${v.hud.yourScore}`, CW - 18, 32);
-    if (usingTouch && v.phase === Phase.PLAY) {
-      ctx.save(); ctx.globalAlpha = 0.9; ctx.fillStyle = "#f4571d"; ctx.beginPath(); ctx.arc(DASH_BTN.x, DASH_BTN.y, DASH_BTN.r, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
-      ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "800 18px system-ui, sans-serif"; ctx.fillText("Spurt", DASH_BTN.x, DASH_BTN.y); ctx.textBaseline = "alphabetic"; ctx.restore();
-    }
-  }
-  function drawScoreboard(v) {
-    if (v.hud.n < 2 || !v.players) return;
-    const board = [...v.players].map((p) => ({ name: p.id === selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, hue: p.hue, you: p.id === selfId })).sort((a, b) => b.score - a.score).slice(0, 8);
-    let y = 82;
-    ctx.textAlign = "left"; ctx.font = "700 14px system-ui, sans-serif";
-    for (const b of board) {
-      ctx.fillStyle = `hsl(${b.hue},85%,60%)`; ctx.beginPath(); ctx.arc(24, y - 4, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = b.you ? "#ffd7c7" : "#eaf6ff"; ctx.fillText(`${b.name}: ${b.score} p`, 36, y); y += 20;
-    }
-  }
-  function panel(lines, sub) {
-    ctx.fillStyle = "rgba(4,20,30,0.62)"; ctx.fillRect(0, 0, CW, CH); ctx.textAlign = "center"; ctx.fillStyle = "#eaf6ff"; ctx.font = "800 40px system-ui, sans-serif";
-    let y = CH / 2 - (lines.length - 1) * 28 - (sub ? 24 : 0);
-    for (const l of lines) { ctx.fillText(l, CW / 2, y); y += 52; }
-    if (sub) { ctx.font = "500 20px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(sub, CW / 2, y + 6); }
-  }
-  function drawOverlays(v) {
-    const prompt = (txt) => { ctx.font = "800 22px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.textAlign = "center"; ctx.fillText(txt, CW / 2, CH / 2 + 74); };
-    const wait = () => { ctx.font = "600 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.textAlign = "center"; ctx.fillText("Väntar på värden…", CW / 2, CH / 2 + 74); };
-    if (v.phase === Phase.INTRO) panel([`Nivå ${v.hud.level + 1}`], `Rädda ${v.hud.quota} · ${v.hud.n} spelare`);
-    else if (v.phase === Phase.CLEARED) drawLevelBoard(v);
-    else if (v.phase === Phase.OVER) drawEndScreen(["Spelet är slut"], `Totalpoäng ${v.hud.score}`, v);
-    else if (v.phase === Phase.WIN) drawEndScreen(["Ni vann! 🛟", `Alla ${BASE_LEVELS.length} nivåer klara`], `Slutpoäng ${v.hud.score}`, v);
-  }
-  // Current-round standings: every player ranked by points (used between
-  // levels and on the end screen).
-  function drawStandings(v, y, maxRows) {
-    const rows = [...(v.players || [])].map((p) => ({ name: p.id === selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, rescues: p.rescues || 0, hue: p.hue, you: p.id === selfId })).sort((a, b) => b.score - a.score).slice(0, maxRows);
-    ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.textAlign = "center"; ctx.fillText("Ställning", CW / 2, y); y += 26;
-    ctx.font = "700 16px system-ui, sans-serif";
-    rows.forEach((r, i) => {
-      const txt = `${i + 1}.  ${r.name}  —  ${r.score} p  ·  ${r.rescues} räddade`;
-      const tw = ctx.measureText(txt).width;
-      ctx.fillStyle = `hsl(${r.hue},85%,60%)`; ctx.beginPath(); ctx.arc(CW / 2 - tw / 2 - 14, y - 5, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = r.you ? "#ffd7c7" : "#eaf6ff"; ctx.fillText(txt, CW / 2, y); y += 23;
-    });
-    return y;
-  }
-  // Between levels: confetti, a top-three podium, the "på väg upp" riser, and
-  // a pulsing wait prompt. Only the host advances (advance() is gated).
-  function drawLevelBoard(v) {
-    const t = waveT;
-    ctx.fillStyle = "rgba(4,20,30,0.78)"; ctx.fillRect(0, 0, CW, CH);
-    const CONF = ["#ffb020", "#e5484d", "#3aa0ff", "#22c55e", "#ec4899", "#f4f4f0"];
-    for (let i = 0; i < 46; i++) {
-      const x = ((i * 197) % CW) + Math.sin(t * 1.3 + i) * 22;
-      const y = ((((t * (38 + (i % 5) * 11) + i * 53) % (CH + 40)) + CH + 40) % (CH + 40)) - 20;
-      ctx.save(); ctx.translate(x, y); ctx.rotate(t * 2 + i); ctx.globalAlpha = 0.85; ctx.fillStyle = CONF[i % CONF.length]; ctx.fillRect(-4, -2.5, 8, 5); ctx.restore();
-    }
-    ctx.globalAlpha = 1; ctx.textAlign = "center";
-    ctx.fillStyle = "#eaf6ff"; ctx.font = "800 36px system-ui, sans-serif"; ctx.fillText(`Nivå ${v.hud.level + 1} avklarad!`, CW / 2, 74);
-    ctx.font = "500 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(`Lagets poäng ${v.hud.score}`, CW / 2, 100);
-    const rows = [...(v.players || [])].map((p) => ({ id: p.id, name: p.id === selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, rescues: p.rescues || 0, hue: p.hue, you: p.id === selfId, gain: (p.score || 0) - (levelStartScore.get(p.id) || 0) })).sort((a, b) => b.score - a.score);
-    // podium: 2nd left, 1st centre, 3rd right
-    const baseY = 300, slots = [[1, -120, 66, "#c9ced6"], [0, 0, 92, "#ffcf3d"], [2, 120, 50, "#d0894f"]];
-    for (const [rank, dx, hgt, col] of slots) {
-      const r = rows[rank]; if (!r) continue;
-      const x = CW / 2 + dx, bounce = rank === 0 ? Math.abs(Math.sin(t * 3)) * 6 : 0;
-      ctx.fillStyle = col; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x - 44, baseY - hgt, 88, hgt, 8) : ctx.rect(x - 44, baseY - hgt, 88, hgt); ctx.fill();
-      ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.font = "800 26px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText(String(rank + 1), x, baseY - hgt / 2 + 10);
-      drawLivboj(x, baseY - hgt - 24 - bounce, 18, r.hue, rank === 0, null, false, false);
-      if (rank === 0) { ctx.font = "22px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText("👑", x, baseY - hgt - 52 - bounce); }
-      ctx.textAlign = "center"; ctx.fillStyle = r.you ? "#ffd7c7" : "#eaf6ff"; ctx.font = "700 15px system-ui, sans-serif"; ctx.fillText(r.name, x, baseY + 20);
-      ctx.fillStyle = "#bfe0f2"; ctx.font = "600 13px system-ui, sans-serif"; ctx.fillText(`${r.score} p · ${r.rescues} räddade`, x, baseY + 38);
-    }
-    let y = baseY + 68;
-    // up-and-coming: biggest gain this level among players not already leading
-    const riser = rows.length > 1 ? rows.slice(1).reduce((m, r) => (r.gain > (m ? m.gain : 0) ? r : m), null) : null;
-    ctx.font = "800 16px system-ui, sans-serif"; ctx.fillStyle = "#7ee0a0";
-    if (riser && riser.gain > 0) ctx.fillText(`⬆ På väg upp: ${riser.name}  +${riser.gain} p den här nivån`, CW / 2, y);
-    else if (rows[0]) ctx.fillText(`Bra jobbat! +${rows[0].gain} p den här nivån`, CW / 2, y);
-    y += 28;
-    if (rows.length > 3) { ctx.font = "600 13px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(rows.slice(3, 12).map((r, i) => `${i + 4}. ${r.name} ${r.score} p`).join("   ·   "), CW / 2, y); }
-    ctx.globalAlpha = 0.7 + 0.3 * Math.sin(t * 3);
-    if (authoritative) drawActionButton("Starta nästa nivå", CW / 2, CH - 64);
-    else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på att värden startar nästa nivå…", CW / 2, CH - 60); }
-    ctx.globalAlpha = 1;
-  }
-  function drawQuitBtn(v) {
-    if (!authoritative || !(v.phase === Phase.PLAY || v.phase === Phase.INTRO || v.phase === Phase.CLEARED)) return;
-    const b = QUIT_BTN, arming = quitArmedUntil > performance.now();
-    ctx.fillStyle = arming ? "rgba(229,72,77,0.92)" : "rgba(255,255,255,0.10)";
-    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(b.x, b.y, b.w, b.h, 12) : ctx.rect(b.x, b.y, b.w, b.h); ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1; ctx.stroke();
-    ctx.fillStyle = "#fff"; ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(arming ? "Säker? Tryck igen" : "Avsluta spelet", b.x + b.w / 2, b.y + b.h / 2); ctx.textBaseline = "alphabetic";
-  }
-  function drawEndScreen(lines, sub, v) {
-    ctx.fillStyle = "rgba(4,20,30,0.76)"; ctx.fillRect(0, 0, CW, CH);
-    ctx.textAlign = "center";
-    let y = 78;
-    ctx.fillStyle = "#eaf6ff"; ctx.font = "800 34px system-ui, sans-serif";
-    for (const l of lines) { ctx.fillText(l, CW / 2, y); y += 40; }
-    ctx.font = "500 18px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText(sub, CW / 2, y); y += 34;
-    y = drawStandings(v, y, 8) + 12;
-    ctx.font = "800 18px system-ui, sans-serif"; ctx.fillStyle = "#f4571d"; ctx.fillText("🏆 Topplista", CW / 2, y); y += 26;
-    const soloGame = (v.players || []).length <= 1;
-    const b = (v.board || []).filter((e) => (e.n === 1) === soloGame); // solo runs compare with solo runs, teams with teams
-    // Entries from before individual crediting worked have a total but all-zero players: show names only.
-    const fmt = (e) => { const ps = e.players || []; const noSplit = ps.every((pp) => typeof pp === "string" || !pp.score); return ps.map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", "); };
-    ctx.font = "600 15px system-ui, sans-serif"; ctx.fillStyle = "#eaf6ff";
-    if (!b.length) { ctx.fillText("Inga resultat än", CW / 2, y); y += 22; }
-    else b.slice(0, 3).forEach((e, i) => { ctx.fillText(`${i + 1}.  ${e.team || (e.n === 1 ? "Solo" : "Lag")} ${e.score} p  ·  ${fmt(e)}  (Nivå ${e.level})`, CW / 2, y); y += 22; });
-    y += 18;
-    if (authoritative) { drawActionButton("Till lobbyn", CW / 2 - 100, y - 4); drawLeaveButton(CW / 2 + 110, y - 4); }
-    else { ctx.font = "600 16px system-ui, sans-serif"; ctx.fillStyle = "#bfe0f2"; ctx.fillText("Väntar på värden…", CW / 2, y); drawLeaveButton(CW / 2, y + 34); }
-  }
-  function drawMute() {
-    ctx.font = "16px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(muted ? "🔇" : "🔊", MUTE_BTN.x, MUTE_BTN.y); ctx.textBaseline = "alphabetic";
+    const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
+    return { world: S.world, obstacles: S.obstacles, swamps: S.swamps, whirls: S.whirls, swimmers: S.swimmers, monsters: S.monsters, players: [...S.players.values()], splashes: S.splashes, hud: { score: S.score, yourScore: (S.players.get(selfId) || {}).score || 0, level: S.levelIndex, caught: S.caught, quota: L.quota, missed: S.missed, allowedMisses: L.allowedMisses, n: S.players.size }, phase: S.phase, introTimer: S.introTimer, board };
   }
 
   // ---- Loop ---------------------------------------------------------------
   let last = performance.now();
   function frame(now) {
-    let dt = (now - last) / 1000; last = now; if (dt > 0.05) dt = 0.05; waveT += dt;
-    ACTION_BTN = null; LEAVE_BTN = null; // only the screens drawn this frame may be clickable
-    fitBacking();
+    let dt = (now - last) / 1000; last = now; if (dt > 0.05) dt = 0.05;
+    R.beginFrame(dt); // animation clock, clickable buttons reset, backing store
     if (authoritative) updateSim(dt); else updateJoin(dt);
     updateSaved(dt);
     if (!authoritative && lastView) {
       const t = performance.now(); if (t - lastStateTime > 3000) { if (!electing) electHost(); else if (t - electAt > 4000) electing = false; }
     }
-    render();
+    R.render();
     requestAnimationFrame(frame);
   }
 
@@ -1971,14 +619,14 @@ export function createGame(canvas, opts) {
   // Host ends the round for everyone: all players land on the scores screen.
   function quitGame() {
     if (!authoritative) return;
-    if (phase !== Phase.PLAY && phase !== Phase.INTRO && phase !== Phase.CLEARED) return;
-    phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState();
+    if (S.phase !== Phase.PLAY && S.phase !== Phase.INTRO && S.phase !== Phase.CLEARED) return;
+    S.phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState();
   }
   function inQuit(cx, cy) { const b = QUIT_BTN; return authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
   function pressQuit() { const now = performance.now(); if (quitArmedUntil > now) { quitArmedUntil = 0; quitGame(); } else quitArmedUntil = now + 3000; }
   function toggleMute() { muted = !muted; try { localStorage.setItem("livboj-muted", muted ? "1" : "0"); } catch {} if (!muted) unlockAudio(); }
-  function curWorld() { return authoritative ? world : (lastView && lastView.world) || world; }
-  function curPhase() { return authoritative ? phase : (lastView && lastView.phase); }
+  function curWorld() { return authoritative ? S.world : (lastView && lastView.world) || S.world; }
+  function curPhase() { return authoritative ? S.phase : (lastView && lastView.phase); }
   canvas.addEventListener("mousedown", (e) => { const c = toCanvas(e.clientX, e.clientY); if (inMute(c.x, c.y)) toggleMute(); else if (inQuit(c.x, c.y)) pressQuit(); else if (inLeave(c.x, c.y)) leaveToStart(); else if (inAction(c.x, c.y)) advance(); }, { passive: true });
   canvas.addEventListener("touchstart", (e) => {
     usingTouch = true; e.preventDefault();
@@ -1989,10 +637,10 @@ export function createGame(canvas, opts) {
       if (inLeave(c.x, c.y)) { leaveToStart(); continue; }
       const ph = curPhase();
       if (ph === Phase.CLEARED || ph === Phase.OVER || ph === Phase.WIN || ph === Phase.LOBBY) { advance(); continue; }
-      if (inDash(c.x, c.y)) dashTap = true; else pointerTarget = toWorld(c.x, c.y, curWorld().w, curWorld().h);
+      if (inDash(c.x, c.y)) dashTap = true; else pointerTarget = R.toWorld(c.x, c.y, curWorld().w, curWorld().h);
     }
   }, { passive: false });
-  canvas.addEventListener("touchmove", (e) => { e.preventDefault(); for (const t of e.changedTouches) { const c = toCanvas(t.clientX, t.clientY); if (!inDash(c.x, c.y) && !inMute(c.x, c.y)) pointerTarget = toWorld(c.x, c.y, curWorld().w, curWorld().h); } }, { passive: false });
+  canvas.addEventListener("touchmove", (e) => { e.preventDefault(); for (const t of e.changedTouches) { const c = toCanvas(t.clientX, t.clientY); if (!inDash(c.x, c.y) && !inMute(c.x, c.y)) pointerTarget = R.toWorld(c.x, c.y, curWorld().w, curWorld().h); } }, { passive: false });
   const touchEnd = (e) => { e.preventDefault(); if (e.touches.length === 0) pointerTarget = null; };
   canvas.addEventListener("touchend", touchEnd, { passive: false });
   canvas.addEventListener("touchcancel", touchEnd, { passive: false }); // (a system gesture or an alert took the finger)
@@ -2007,25 +655,25 @@ export function createGame(canvas, opts) {
     hostStart, getRoom: () => opts.room, relay: () => (room && room.stats ? room.stats() : null), roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
     board: () => ({ source: boardSource, entries: board.slice(0, BOARD_SHOW) }),
     signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
-    _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
+    _jump: (idx) => { if (authoritative) { S.levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(S.levelIndex); S.phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,
-      phase: authoritative ? phase : (lastView && lastView.phase),
-      timeLeft: Math.round(authoritative ? timeLeft : (lastView ? lastView.timeLeft : -1)),
-      n: authoritative ? players.size : iPlayer.size, hasState: !!lastView,
-      caught: authoritative ? caught : (lastView ? lastView.caught : 0),
-      level: authoritative ? levelIndex : (lastView ? lastView.levelIndex : 0),
-      monsters: authoritative ? monsters.length : iMonster.size,
-      rescues: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
-      sw: authoritative ? swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
+      phase: authoritative ? S.phase : (lastView && lastView.phase),
+      timeLeft: Math.round(authoritative ? S.timeLeft : (lastView ? lastView.timeLeft : -1)),
+      n: authoritative ? S.players.size : iPlayer.size, hasState: !!lastView,
+      caught: authoritative ? S.caught : (lastView ? lastView.caught : 0),
+      level: authoritative ? S.levelIndex : (lastView ? lastView.levelIndex : 0),
+      monsters: authoritative ? S.monsters.length : iMonster.size,
+      rescues: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
+      sw: authoritative ? S.swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
       self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
-      players: [...(authoritative ? players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
-      mon: (authoritative ? monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30, +(m.dir || 0).toFixed(3), +(m.sub || 0).toFixed(2)]),
-      swamp: (authoritative ? swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
-      obstacles: (authoritative ? obstacles : (lastView && lastView.obstacles) || []).map((o) => [Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h)]),
-      whirls: (authoritative ? whirls : (lastView && lastView.whirls) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
-      missed: authoritative ? missed : (lastView ? lastView.missed : 0),
-      saved: saved.length, quitBtn: QUIT_BTN, actionBtn: ACTION_BTN, leaveBtn: LEAVE_BTN,
+      players: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
+      mon: (authoritative ? S.monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30, +(m.dir || 0).toFixed(3), +(m.sub || 0).toFixed(2)]),
+      swamp: (authoritative ? S.swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
+      obstacles: (authoritative ? S.obstacles : (lastView && lastView.obstacles) || []).map((o) => [Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h)]),
+      whirls: (authoritative ? S.whirls : (lastView && lastView.whirls) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
+      missed: authoritative ? S.missed : (lastView ? lastView.missed : 0),
+      saved: saved.length, quitBtn: QUIT_BTN, actionBtn: R.actionBtn(), leaveBtn: R.leaveBtn(),
     }),
   };
 }
