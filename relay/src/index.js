@@ -16,6 +16,11 @@
 //   GET  /board                      -> { entries: [top 50] }
 //   POST /board  { entries: [...] }  -> merges (dedupe by id), returns { entries }
 //   DELETE /board?key=<ADMIN_KEY>    -> wipes it (only if the ADMIN_KEY secret is set)
+//
+// Förslagslåda (suggestion box, kept in the same Board object under its own key):
+//   POST   /forslag  { text, name? }            -> { ok: true }   (never returns suggestions)
+//   GET    /forslag?key=<ADMIN_KEY>             -> { items: [newest first] }
+//   DELETE /forslag?key=<ADMIN_KEY>[&id=<id>]   -> removes one, or all
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -29,7 +34,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    if (url.pathname === "/board") return env.BOARD.get(env.BOARD.idFromName("global")).fetch(request);
+    if (url.pathname === "/board" || url.pathname === "/forslag") return env.BOARD.get(env.BOARD.idFromName("global")).fetch(request);
     const m = url.pathname.match(/^\/room\/([A-Za-z0-9]{3,8})$/);
     if (!m) return new Response("livboj relay ok", { headers: { "content-type": "text/plain", ...CORS } });
     const id = env.ROOM.idFromName(m[1].toUpperCase());
@@ -98,11 +103,17 @@ function sanitize(e) {
 }
 const order = (a, b) => b.score - a.score || b.ts - a.ts;
 
+// ---- Förslagslåda ----------------------------------------------------------
+const FORSLAG_KEEP = 500, FORSLAG_TEXT = 500, FORSLAG_NAME = 14, FORSLAG_BODY = 4096, FORSLAG_GAP_MS = 10_000;
+// control characters out (the text keeps its line breaks), then trimmed
+const clean = (v, keepNewlines) => (typeof v === "string" ? v.replace(keepNewlines ? /[\u0000-\u0009\u000B-\u001F\u007F]/g : /[\u0000-\u001F\u007F]/g, keepNewlines ? (c) => (c === "\t" ? " " : "") : "").trim() : "");
+
 export class Board {
-  constructor(state, env) { this.state = state; this.env = env; }
+  constructor(state, env) { this.state = state; this.env = env; this.lastPost = new Map(); }
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/forslag") return this.forslag(request, url);
     if (request.method === "GET") {
       const all = await this.all(), since = Date.now() - RECENT_MS;
       const recent = all.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX);
@@ -132,4 +143,40 @@ export class Board {
     return json({ error: "method" }, 405);
   }
   async all() { return (await this.state.storage.get("entries")) || []; }
+
+  admin(url) { const key = this.env.ADMIN_KEY; return !!key && url.searchParams.get("key") === key; }
+  async forslag(request, url) {
+    if (request.method === "POST") {
+      if (+(request.headers.get("content-length") || 0) > FORSLAG_BODY) return json({ error: "too large" }, 413);
+      const raw = await request.text();
+      if (raw.length > FORSLAG_BODY) return json({ error: "too large" }, 413);
+      let body; try { body = JSON.parse(raw); } catch { return json({ error: "bad json" }, 400); }
+      if (!body || typeof body !== "object") return json({ error: "bad json" }, 400);
+      const text = clean(body.text, true), name = clean(body.name, false).slice(0, FORSLAG_NAME);
+      if (!text) return json({ error: "empty" }, 400);
+      if (text.length > FORSLAG_TEXT) return json({ error: "too long" }, 400);
+      // light throttle: one suggestion per IP per 10 s (in memory: resets when the object sleeps, which is fine)
+      const ip = request.headers.get("cf-connecting-ip") || "?", now = Date.now();
+      if (now - (this.lastPost.get(ip) || 0) < FORSLAG_GAP_MS) return json({ error: "slow down" }, 429);
+      this.lastPost.set(ip, now);
+      if (this.lastPost.size > 1000) for (const [k, t] of this.lastPost) if (now - t > FORSLAG_GAP_MS) this.lastPost.delete(k);
+      const items = (await this.state.storage.get("forslag")) || [];
+      items.push({ id: crypto.randomUUID(), ts: now, text, name });
+      await this.state.storage.put("forslag", items.slice(-FORSLAG_KEEP));
+      return json({ ok: true });
+    }
+    if (request.method === "GET") {
+      if (!this.admin(url)) return json({ error: "forbidden" }, 403);
+      const items = (await this.state.storage.get("forslag")) || [];
+      return json({ items: items.slice().reverse() });
+    }
+    if (request.method === "DELETE") {
+      if (!this.admin(url)) return json({ error: "forbidden" }, 403);
+      const id = url.searchParams.get("id");
+      const kept = id ? ((await this.state.storage.get("forslag")) || []).filter((e) => e.id !== id) : [];
+      await this.state.storage.put("forslag", kept);
+      return json({ ok: true, left: kept.length });
+    }
+    return json({ error: "method" }, 405);
+  }
 }

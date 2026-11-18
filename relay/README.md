@@ -47,10 +47,38 @@ uploads the old local list from its browser once. Anyone with the URL could
 post scores — fine for an office game. To wipe the list, set a secret once
 (`npx wrangler secret put ADMIN_KEY`) and call `DELETE /board?key=<ADMIN_KEY>`.
 
+## Förslagslåda (suggestion box)
+
+The start page's *Förslagslåda* posts here. Suggestions are stored in the same
+`Board` Durable Object under their own storage key (newest 500 kept; no new
+binding or migration) and are never returned to the public.
+
+```
+POST   /forslag  {"text": "…", "name": "…"}     # -> { ok: true }
+GET    /forslag?key=<ADMIN_KEY>                 # -> { items: [{ id, ts, text, name }, …] } newest first
+DELETE /forslag?key=<ADMIN_KEY>&id=<id>         # remove one (without &id: remove all)
+```
+
+`text` must be non-empty after trimming and at most 500 characters; `name` is
+optional (cut to 14). Control characters are stripped (line breaks kept), bodies
+over 4 KB get 413, and one IP may post once per 10 s (429). GET/DELETE answer
+403 unless the `ADMIN_KEY` secret is set and matches.
+
+To read the box (after `npx wrangler secret put ADMIN_KEY` once):
+
+```bash
+curl -s "https://livboj-relay.livboj.workers.dev/forslag?key=$ADMIN_KEY" | python3 -m json.tool
+```
+
+Until a relay with this endpoint is deployed, `POST /forslag` answers 404 and
+the page shows its normal "Det gick inte att skicka" message (the text stays).
+
 ## Local test (no account needed)
 
 ```bash
+echo "ADMIN_KEY=local-test-key" > .dev.vars   # (git-ignored) for the admin endpoints
 npx wrangler dev --local     # serves ws://localhost:8787
 ```
 
-then open the game with `?relay=ws://localhost:8787`.
+then open the game with `?relay=ws://localhost:8787`. The repo's smoke test can
+drive it end to end: `node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787`.
