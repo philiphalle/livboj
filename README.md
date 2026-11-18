@@ -24,7 +24,7 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | `nyheter.json` | The news shown on the start page (see *Nyheter* below). |
 | `manifest.webmanifest`, `icons/`, `favicon.svg` | Add-to-home-screen / install (fullscreen on phones). No service worker. |
 | `relay/` | Cloudflare Worker: the WebSocket room relay and the global leaderboard (`relay/README.md`). |
-| `tools/` | Dev only: `sim-test.mjs` (tests for the rules and the layouts, plain node), `bot.mjs` (a deterministic bot that plays every level: clear rate, rescues per minute, misses — for comparing difficulty between two `sim.js`), `smoke.mjs` (browser checks), `shot.mjs` (screenshots), `icons.mjs` (renders `icons/` from `favicon.svg`). |
+| `tools/` | Dev only: `sim-test.mjs` (tests for the rules and the layouts, plain node), `bot.mjs` (a deterministic bot that plays every level: clear rate, rescues per minute, misses — for comparing difficulty between two `sim.js`), `smoke.mjs` (browser checks), `load.mjs` (N bot players in one room through a relay: message rates, quota projection, sanity), `feel.mjs` (a remote ring on the host's screen, a joiner's rescue delay), `relay-check.mjs` (the relay's directed delivery, plain WebSockets), `shot.mjs` (screenshots), `icons.mjs` (renders `icons/` from `favicon.svg`). |
 
 ## Run locally
 
@@ -66,6 +66,25 @@ and the leaderboard says *Lag* as before. Solo games have none.
 Transport is the WebSocket relay (`relay/`), which works on office networks that block WebRTC.
 The client reconnects by itself (short backoff, when the page returns from the background, when
 the network comes back) without dropping anyone from the roster.
+
+**Network budget.** The relay runs on Cloudflare's free plan: 100,000 requests a day for the whole
+account, and every WebSocket message a client *sends* counts towards it (what the relay sends out is
+free). So (`game.js`, the constants at the top):
+
+- The host sends its state 20 times a second only in INTRO and PLAY. In the lobby, on the level board
+  and on the end screens it sends on every change (roster, names, team name, phase, leaderboard) plus a
+  heartbeat every 600 ms — joiners call an election after 3 s without state, so three lost or late
+  heartbeats in a row are still fine. A hidden host tab's timers run once a second (as before).
+- A joiner sends its position only in PLAY, ~12 times a second, and not at all while nothing changed
+  (position, dash, stun) except a heartbeat once a second; and only to the host (`to` = the host's id,
+  the relay delivers it to that player alone). Before the first snapshot, and while the host it knows
+  has left (an election), it sends to everyone. Hello and the reconnect probes always go to everyone.
+- The host draws a remote ring smoothly between its reports; the rules use the latest reported
+  position and the path between two reports, so a joiner whose ring touched a swimmer on its own screen
+  gets the rescue.
+
+An older relay ignores `to` and broadcasts, an older client never sends it: every mix works (the
+snapshot and input formats are unchanged). `node tools/load.mjs --relay …` measures it all.
 
 ## Leaderboard
 
@@ -115,5 +134,10 @@ npm install                       # once: Playwright for the tools below (or it 
 node tools/smoke.mjs              # layout, fullscreen, water layer, HUD see-through, every button by click/tap, input, leaderboard queue, cache busting (leaderboard always stubbed)
 node tools/smoke.mjs --live       # + host/join, forced reconnects and the team name (incl. old/new builds mixed) through the live relay
 node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
+node tools/relay-check.mjs --relay ws://127.0.0.1:8787                 # the relay's `to` (directed delivery), plain WebSockets
+node tools/load.mjs --relay ws://127.0.0.1:8787 --minutes 3            # 8 bots in one room: msgs/s per client and for the room, quota hours/day, sanity
+node tools/load.mjs --relay ws://127.0.0.1:8787 --kill-host-at 60      # …and the host closes mid-game: a joiner takes over
+node tools/feel.mjs --relay ws://127.0.0.1:8787 --compare 3ee8dd0      # a remote ring on the host's screen, rescue delay: this build vs another
+# node tools/load.mjs  (no --relay) runs against the LIVE relay and spends the shared daily quota: once, deliberately
 node tools/shot.mjs               # screenshots of menu + solo game at desktop and phone sizes -> shots/
 ```

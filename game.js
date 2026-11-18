@@ -18,6 +18,19 @@ const { RELAY_URL, SIG_PARAM, RTC, APP_ID, SIGNAL, getRelaySockets, pickSignalin
 export const { fetchGlobalBoard, fetchGlobalBoardFull, postForslag } = net;
 let selfId = net.initialSelfId; // re-pointed to the chosen strategy's id before any use
 const BOARD_SHOW = 10;
+// ---- Network rates. The relay runs on Cloudflare's free plan, where every message a client sends
+// counts towards a shared daily request cap (outgoing messages from the relay are free), so nobody
+// sends what nobody needs:
+// - The host's state: every STATE_MS (20 Hz) while it changes by itself (INTRO, PLAY). In the lobby,
+//   on the level board and on the end screens it is pushed on every change (roster, names, team
+//   name, phase, board) plus a heartbeat every STATE_HEARTBEAT_MS. Joiners call an election after
+//   3000 ms without state (also older builds): 600 ms leaves room for three lost or late messages in
+//   a row, and stays under the 1 s that a browser throttles a hidden tab's timers to (a hidden host
+//   then sends once a second, as it always did).
+// - A joiner's position: only in PLAY, every INPUT_MS (~12 Hz), skipped while nothing changed since
+//   the last send (position, dash, stun), with a heartbeat every INPUT_HEARTBEAT_MS. Sent to the host
+//   only (the relay's `to`), not to every phone in the room.
+const STATE_MS = 50, STATE_HEARTBEAT_MS = 600, INPUT_MS = 85, INPUT_HEARTBEAT_MS = 1000;
 
 // ---- Sound (WebAudio, synthesized — no assets) ---------------------------
 let audioCtx = null;
@@ -267,6 +280,7 @@ export function createGame(canvas, opts) {
   const iSwim = new Map(), iPlayer = new Map(), iMonster = new Map();
   let jSplashes = [];
   let lastView = null, lastStateTime = 0;
+  let lastDrawn = null; // the players as drawn in the last frame (host: remote rings smoothed) — debug() / tests
 
   // Networking
   let room = null, sendState = null, sendInput = null, sendHello = null;
@@ -331,7 +345,7 @@ export function createGame(canvas, opts) {
       else if (sendHello) sendHello({ name: myName });
     });
     room.onPeerLeave((peer) => {
-      if (authoritative) { S.players.delete(peer); emitRoster(); }
+      if (authoritative) { S.players.delete(peer); peerIn.delete(peer); emitRoster(); pushState(); }
       else if (lastView && peer === lastView.hostId) electHost();
     });
     if (asHost) wireHost(); else wireJoin();
@@ -347,27 +361,109 @@ export function createGame(canvas, opts) {
   }
   function wireJoin() {
     A.st[1]((data) => applyState(data));
-    sendInput = (inp) => { try { A.inp[0](inp); } catch {} };
-    sendHello = (d) => { try { A.hi[0](d); } catch {} };
+    sendInput = (inp, to) => { try { A.inp[0](inp, to); } catch {} };
+    sendHello = (d) => { try { A.hi[0](d); } catch {} }; // (to everyone: the host may not be known yet)
     const iv = setInterval(() => { if (!lastView) sendHello({ name: myName }); else clearInterval(iv); }, 700);
     // Only report a position once seeded from the host's PLAY snapshot for
     // this level — otherwise the initial (0,0) would override the spawn slot.
-    setInterval(() => { if (!authoritative && sendInput && selfPos.seeded) sendInput({ x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0, stun: selfPos.stun > 0 ? 1 : 0 }); }, 50);
+    setInterval(() => reportInput(), INPUT_MS);
   }
-  function startBroadcast() { if (broadcasting) return; broadcasting = true; setInterval(() => { if (authoritative && room) pushState(); }, 50); }
+  // A joiner's position to the host: every INPUT_MS while it changes, else at the heartbeat — and at
+  // once (urgent) when its ring touches a swimmer on its own screen, so a rescue registers no later
+  // than with the old 20 Hz reports.
+  let inLastKey = "", inLastAt = -1e9, inLastTo, urgentFor = null;
+  function reportInput(urgent) {
+    if (authoritative || !sendInput || !selfPos.seeded || !lastView || (lastView.phase !== Phase.PLAY && lastView.phase !== Phase.INTRO)) return;
+    const d = { x: Math.round(selfPos.x), y: Math.round(selfPos.y), dash: selfPos.dashActive > 0 ? 1 : 0, stun: selfPos.stun > 0 ? 1 : 0 };
+    const key = `${d.x},${d.y},${d.dash},${d.stun}`, to = inputTarget(), now = performance.now();
+    if (key === inLastKey && to === inLastTo && now - inLastAt < INPUT_HEARTBEAT_MS) return false; // nothing new: the host has it
+    if (urgent && now - inLastAt < 30) return false; // (at most one extra report per two frames)
+    inLastKey = key; inLastAt = now; inLastTo = to;
+    sendInput(d, to);
+    return true;
+  }
+  // Where a joiner's input goes: the host of the last snapshot, while it is in the room. Before the
+  // first snapshot, or once that host has left (an election is on), to everyone: whoever takes over
+  // gets it straight away. A host change shows up as a new hostId and is sent to at once (the change
+  // of target forces a send). An older relay ignores the target and broadcasts — harmless.
+  function inputTarget() {
+    const h = lastView && lastView.hostId;
+    if (!h || h === selfId) return undefined;
+    const peers = room && room.getPeers ? room.getPeers() : null;
+    return peers && peers[h] ? h : undefined;
+  }
+  let lastPushAt = -1e9;
+  function startBroadcast() {
+    if (broadcasting) return; broadcasting = true;
+    setInterval(() => {
+      if (!authoritative || !room) return;
+      const live = (S.phase === Phase.PLAY || S.phase === Phase.INTRO) && (!room.getPeers || Object.keys(room.getPeers()).length > 0);
+      if (live || performance.now() - lastPushAt >= STATE_HEARTBEAT_MS - 5) pushState(); // (-5: an interval tick may come a hair early)
+    }, STATE_MS);
+  }
 
   function addPlayer(id, name) { S.addPlayer(id, name); }
   function renamePlayer(id, name) { S.renamePlayer(id, name); }
   // A peer owns its own position (co-op: trust the client so what it sees is real).
+  //
+  // Positions arrive ~12 times a second (older builds: 20). The SIM uses the latest reported
+  // position — never a smoothed one, which lags behind where the joiner's ring really is — and the
+  // path between two reports counts too (sweepTouch): a joiner whose ring touched a swimmer on its
+  // own screen between two reports still gets the rescue, as with the old 20 Hz reports. Only the
+  // host's DRAWING of a remote ring is smoothed (drawnRemote).
+  const peerIn = new Map(); // id -> { at: last change, gap: typical ms between changes }
   function applyPeerInput(peer, data) {
     let p = S.players.get(peer);
-    if (!p) { addPlayer(peer, "Spelare"); p = S.players.get(peer); emitRoster(); }
+    if (!p) { addPlayer(peer, "Spelare"); p = S.players.get(peer); emitRoster(); pushState(); }
     if (p && data && typeof data.x === "number") {
-      p.x = Math.max(p.r, Math.min(S.world.w - p.r, data.x));
-      p.y = Math.max(p.r, Math.min(S.world.h - p.r, data.y));
+      const nx = Math.max(p.r, Math.min(S.world.w - p.r, data.x)), ny = Math.max(p.r, Math.min(S.world.h - p.r, data.y));
+      if (nx !== p.x || ny !== p.y) {
+        const now = performance.now(), q = peerIn.get(peer) || { at: 0, gap: INPUT_MS };
+        const g = now - q.at; if (q.at && g < 400) q.gap = q.gap * 0.7 + g * 0.3;
+        q.at = now; peerIn.set(peer, q);
+      }
+      if (p.after) p.after = { x: nx, y: ny }; // a touch still waiting for its sim step keeps its place; the ring goes on from there
+      else {
+        const touch = S.phase === Phase.PLAY ? sweepTouch(p.x, p.y, nx, ny, p.r) : null;
+        if (touch) { p.x = touch.x; p.y = touch.y; p.after = { x: nx, y: ny }; } // the next sim step sees the touch, then it moves on
+        else { p.x = nx; p.y = ny; }
+      }
       p.dashActive = data.dash ? 0.18 : 0;
       p.stunned = !!data.stun;
     }
+  }
+  // Where on the segment a→b a ring of radius r came closest to a swimmer it touched on the way
+  // and b does not (the earliest such swimmer), or null.
+  function sweepTouch(ax, ay, bx, by, r) {
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    if (L2 < 1) return null;
+    let best = null, bestT = 2;
+    for (const s of S.swimmers) {
+      const R = r + s.r;
+      if (Math.hypot(s.x - bx, s.y - by) < R) continue; // b touches it: the sim finds that one at b
+      const t = Math.max(0, Math.min(1, ((s.x - ax) * dx + (s.y - ay) * dy) / L2));
+      if (t < bestT && Math.hypot(ax + dx * t - s.x, ay + dy * t - s.y) < R - 0.5) { bestT = t; best = { x: ax + dx * t, y: ay + dy * t }; }
+    }
+    return best;
+  }
+  // after each sim step: a ring held at its touch point goes on to where it was reported
+  function settleTouches() { for (const p of S.players.values()) if (p.after) { p.x = p.after.x; p.y = p.after.y; p.after = null; } }
+  // The host's view of a remote ring: from where it is drawn now to the newest report, at an even
+  // pace over the typical time between reports — no 25 px hops at 12 Hz. A jump (a new level's
+  // start slots, a ring back from far away) is drawn at once.
+  const drawn = new Map(); // id -> { x, y, sx, sy, tx, ty, t0, dur }
+  function drawnRemote(p, now) {
+    const T = p.after || p;
+    let d = drawn.get(p.id);
+    if (!d) { d = { x: T.x, y: T.y, sx: T.x, sy: T.y, tx: T.x, ty: T.y, t0: now, dur: 1 }; drawn.set(p.id, d); }
+    if (T.x !== d.tx || T.y !== d.ty) {
+      const jump = Math.hypot(T.x - d.x, T.y - d.y) > 180;
+      d.sx = jump ? T.x : d.x; d.sy = jump ? T.y : d.y; d.tx = T.x; d.ty = T.y; d.t0 = now;
+      const q = peerIn.get(p.id); d.dur = Math.max(30, Math.min(150, 1.15 * (q ? q.gap : INPUT_MS))); // (a little longer than the typical gap: a late report doesn't leave the ring standing)
+    }
+    const k = Math.min(1, (now - d.t0) / d.dur);
+    d.x = d.sx + (d.tx - d.sx) * k; d.y = d.sy + (d.ty - d.sy) * k;
+    return { ...p, x: d.x, y: d.y };
   }
   function rosterList() { return [...S.players.values()].map((p) => ({ id: p.id, name: p.id === selfId ? myName : p.name, you: p.id === selfId })); }
   function emitBoard() { cbs.onBoard && cbs.onBoard(board, boardSource); }
@@ -398,7 +494,7 @@ export function createGame(canvas, opts) {
     // so a failed post is retried on the next page load / when back online.
     if (authoritative) { queueResult(entry); flushBoardQueue().then((merged) => { if (merged) adoptBoard(merged, "global"); }); }
   }
-  function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); } // local cache only
+  function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); if (authoritative && room) pushState(); } // local cache only
 
   // A rescued swimmer heads for the beach and cheers once it arrives. Purely
   // cosmetic and spawned locally on every client (from the rescue event), so
@@ -464,6 +560,7 @@ export function createGame(canvas, opts) {
   function updateSim(dt) {
     const wasPlay = S.phase === Phase.PLAY;
     S.update(dt, localInput);
+    settleTouches();
     if (wasPlay) dashTap = false;
   }
 
@@ -486,6 +583,7 @@ export function createGame(canvas, opts) {
     whirlPull(selfPos, lastView.whirls || [], dt, WHIRL_PLAYER); // the whirlpool tugs at joiners too
     selfPos.y = Math.max(selfPos.r, Math.min(shoreY(w) - selfPos.r, selfPos.y));
     dashTap = false;
+    for (const [id, s] of iSwim) if (id !== urgentFor && Math.hypot(s.x - selfPos.x, s.y - selfPos.y) < selfPos.r + (s.r || 16)) { if (reportInput(true)) urgentFor = id; break; } // touching one: tell the host now (once per swimmer)
   }
 
   // ---- State sync ---------------------------------------------------------
@@ -512,6 +610,7 @@ export function createGame(canvas, opts) {
       team: team || undefined, // optional: the team's name (none: left out)
     };
     S.fxOut = [];
+    lastPushAt = performance.now();
     try { sendState(snap); } catch {}
   }
 
@@ -609,17 +708,21 @@ export function createGame(canvas, opts) {
       for (const p of iPlayer.values()) { p.x += (p.tx - p.x) * sm; p.y += (p.ty - p.y) * sm; }
       for (const m of iMonster.values()) { m.x += (m.tx - m.x) * sm; m.y += (m.ty - m.y) * sm; m.wob = (m.wob || 0) + 0.12; }
       for (let i = jSplashes.length - 1; i >= 0; i--) { jSplashes[i].t += 0.03; if (jSplashes[i].t > 0.6) jSplashes.splice(i, 1); }
+      lastDrawn = [...iPlayer.values()].map((p) => p.id === selfId ? { ...p, x: selfPos.x, y: selfPos.y } : p);
       return {
         world: lastView.world, obstacles: lastView.obstacles, swamps: lastView.swamps || [], whirls: lastView.whirls || [],
         swimmers: [...iSwim.values()], monsters: [...iMonster.values()],
-        players: [...iPlayer.values()].map((p) => p.id === selfId ? { ...p, x: selfPos.x, y: selfPos.y } : p),
+        players: lastDrawn,
         splashes: jSplashes,
         hud: { score: lastView.score, yourScore: (iPlayer.get(selfId) || {}).score || 0, level: lastView.levelIndex, caught: lastView.caught, quota: lastView.quota, missed: lastView.missed, allowedMisses: lastView.allowedMisses, n: iPlayer.size },
         phase: lastView.phase, introTimer: lastView.introTimer, board: lastView.board || [], team: lastView.team || "",
       };
     }
-    const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
-    return { world: S.world, obstacles: S.obstacles, swamps: S.swamps, whirls: S.whirls, swimmers: S.swimmers, monsters: S.monsters, players: [...S.players.values()], splashes: S.splashes, hud: { score: S.score, yourScore: (S.players.get(selfId) || {}).score || 0, level: S.levelIndex, caught: S.caught, quota: L.quota, missed: S.missed, allowedMisses: L.allowedMisses, n: S.players.size }, phase: S.phase, introTimer: S.introTimer, board, team };
+    const L = levelParams(S.levelIndex, Math.max(1, S.players.size)), now = performance.now();
+    for (const id of drawn.keys()) if (!S.players.has(id)) drawn.delete(id);
+    const players = [...S.players.values()].map((p) => (p.id === selfId ? p : drawnRemote(p, now)));
+    lastDrawn = players;
+    return { world: S.world, obstacles: S.obstacles, swamps: S.swamps, whirls: S.whirls, swimmers: S.swimmers, monsters: S.monsters, players, splashes: S.splashes, hud: { score: S.score, yourScore: (S.players.get(selfId) || {}).score || 0, level: S.levelIndex, caught: S.caught, quota: L.quota, missed: S.missed, allowedMisses: L.allowedMisses, n: S.players.size }, phase: S.phase, introTimer: S.introTimer, board, team };
   }
 
   // ---- Loop ---------------------------------------------------------------
@@ -716,7 +819,11 @@ export function createGame(canvas, opts) {
       rescues: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),
       sw: authoritative ? S.swimmers.map((s) => [Math.round(s.x), Math.round(s.y)]) : [...iSwim.values()].map((s) => [Math.round(s.x), Math.round(s.y)]),
       self: { x: Math.round(selfPos.x), y: Math.round(selfPos.y) },
-      players: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y) })),
+      players: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => {
+        const dr = (lastDrawn || []).find((q) => q.id === p.id);
+        return { you: p.id === selfId, name: p.name, x: Math.round(p.x), y: Math.round(p.y), rescues: p.rescues || 0, drawn: dr ? [+dr.x.toFixed(1), +dr.y.toFixed(1)] : null };
+      }),
+      hostId: authoritative ? selfId : (lastView ? lastView.hostId : null), selfId,
       mon: (authoritative ? S.monsters : [...iMonster.values()]).map((m) => [Math.round(m.x), Math.round(m.y), m.r || 30, +(m.dir || 0).toFixed(3), +(m.sub || 0).toFixed(2)]),
       swamp: (authoritative ? S.swamps : (lastView && lastView.swamps) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.w), Math.round(z.h)]),
       obstacles: (authoritative ? S.obstacles : (lastView && lastView.obstacles) || []).map((o) => [Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h)]),

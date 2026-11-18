@@ -84,7 +84,10 @@ export function relayJoin(url, roomId, selfId) {
   const BACKOFF = [400, 1000, 2000, 4000, 6000], KEEPALIVE_MS = 25000, LEAVE_GRACE_MS = 2500;
   const handlers = new Map(); const peers = new Set(); const queue = []; const pendingLeave = new Map();
   let joinCb = () => {}, leaveCb = () => {}, ws = null, open = false, closed = false, tries = 0, retry = 0, hiddenAt = 0, lastHere = 0;
-  const stats = { connects: 0, forced: 0 };
+  // counters for tests (window.livboj.relay()): per action, [messages, bytes] sent and received; every
+  // close (code, whether it had opened) and connects that never opened (a refused upgrade, a dead network)
+  const stats = { connects: 0, forced: 0, sent: {}, recv: {}, closes: [], failed: 0 };
+  const count = (box, a, len) => { const c = box[a] || (box[a] = [0, 0]); c[0]++; c[1] += len; };
   const addPeer = (id) => { if (!id || id === selfId) return; cancelLeave(id); if (!peers.has(id)) { peers.add(id); joinCb(id); } };
   function cancelLeave(id) { const t = pendingLeave.get(id); if (t) { clearTimeout(t); pendingLeave.delete(id); } }
   function deferLeave(id) {
@@ -110,10 +113,12 @@ export function relayJoin(url, roomId, selfId) {
     try { sock = new WebSocket(`${url.replace(/\/$/, "")}/room/${encodeURIComponent(roomId)}?id=${encodeURIComponent(selfId)}`); }
     catch { later(); return; }
     ws = sock; stats.connects++;
-    sock.onopen = () => { if (sock !== ws) return; open = true; for (const q of queue) sock.send(q); queue.length = 0; };
+    let opened = false;
+    sock.onopen = () => { if (sock !== ws) return; open = opened = true; for (const q of queue) { sock.send(q.s); count(stats.sent, q.a, q.s.length); } queue.length = 0; };
     sock.onmessage = (e) => {
       if (sock !== ws) return;
       let m; try { m = JSON.parse(e.data); } catch { return; }
+      count(stats.recv, m.t === "msg" ? m.a : m.t, typeof e.data === "string" ? e.data.length : 0);
       if (m.t === "welcome") {
         tries = 0;
         const here = new Set((m.peers || []).filter((id) => id !== selfId)); // (a stale socket of ours may still be listed)
@@ -131,7 +136,11 @@ export function relayJoin(url, roomId, selfId) {
         const cb = handlers.get(m.a); if (cb) cb(m.d, m.from);
       }
     };
-    sock.onclose = () => { if (sock !== ws) return; ws = null; open = false; later(); };
+    sock.onclose = (e) => {
+      if (stats.closes.length < 50) stats.closes.push({ code: e && e.code, opened, at: Math.round(performance.now()) });
+      if (!opened) stats.failed++;
+      if (sock !== ws) return; ws = null; open = false; later();
+    };
     sock.onerror = () => {}; // onclose follows
   }
   const onVisible = () => {
@@ -145,15 +154,33 @@ export function relayJoin(url, roomId, selfId) {
   document.addEventListener("visibilitychange", onVisible);
   addEventListener("pageshow", onPageShow);
   addEventListener("online", onOnline);
-  const ka = setInterval(() => { if (open && ws) { try { ws.send('{"t":"ka"}'); } catch {} } }, KEEPALIVE_MS); // the relay ignores it; keeps NATs / radios from dropping an idle socket
+  const ka = setInterval(() => { if (open && ws) { try { ws.send('{"t":"ka"}'); count(stats.sent, "ka", 10); } catch {} } }, KEEPALIVE_MS); // the relay ignores it; keeps NATs / radios from dropping an idle socket
   connect(false);
-  function sendRaw(o) { const s = JSON.stringify(o); if (open && ws) { try { ws.send(s); } catch {} } else if (queue.length < 60) queue.push(s); }
+  // While (re)connecting, messages wait in the queue. Of the state and the position only the newest
+  // is worth sending (a stale burst would only spend the relay's request budget); a dropped state's
+  // one-off events (fx: rescues, misses) ride along with the newer one.
+  function sendRaw(o) {
+    const a = o.a || o.t;
+    if (open && ws) { const s = JSON.stringify(o); try { ws.send(s); count(stats.sent, a, s.length); } catch {} return; }
+    if (a === "st" || a === "inp") {
+      const i = queue.findIndex((q) => q.a === a && q.to === o.to);
+      if (i >= 0) {
+        const old = queue.splice(i, 1)[0].o;
+        if (a === "st" && o.d && old.d && Array.isArray(old.d.fx) && old.d.fx.length) o = { ...o, d: { ...o.d, fx: [...old.d.fx, ...(o.d.fx || [])] } };
+      }
+    }
+    if (queue.length < 60) queue.push({ s: JSON.stringify(o), a, to: o.to, o });
+  }
   return {
-    makeAction: (name) => [(d) => sendRaw({ t: "msg", a: name, d }), (cb) => handlers.set(name, cb)],
+    // send(d) goes to everyone in the room; send(d, id) only to that peer (the relay's `to`; an
+    // older relay ignores it and broadcasts, so no receiver may count on not getting a message).
+    // The same call shape as Trystero's send(data, targetPeers).
+    makeAction: (name) => [(d, to) => sendRaw(typeof to === "string" && to ? { t: "msg", a: name, d, to } : { t: "msg", a: name, d }), (cb) => handlers.set(name, cb)],
     onPeerJoin: (cb) => { joinCb = cb; }, onPeerLeave: (cb) => { leaveCb = cb; },
     getPeers: () => Object.fromEntries([...peers].map((p) => [p, true])),
     isOpen: () => open,
-    reconnect: () => connect(true), stats: () => ({ ...stats, open, peers: [...peers], pendingLeaves: pendingLeave.size }),
+    reconnect: () => connect(true),
+    stats: () => ({ ...stats, sent: { ...stats.sent }, recv: { ...stats.recv }, closes: stats.closes.slice(), open, peers: [...peers], pendingLeaves: pendingLeave.size }),
     leave: () => {
       closed = true; clearTimeout(retry); clearInterval(ka);
       for (const t of pendingLeave.values()) clearTimeout(t); pendingLeave.clear();

@@ -19,7 +19,9 @@
 // cache busting (the build id covers every module, each module loads once under
 // ?v=<build>, a change to sim.js alone is noticed and a reload runs it); and
 // with --live, that a forced reconnect neither drops nor duplicates a player
-// and never starts a host election; also with --live, the team name (host's lobby
+// and never starts a host election, and the message rates (the host's state at a heartbeat in the
+// lobby and on the level board, 20 Hz in play; a joiner's position ~12 Hz moving, ~1/s standing,
+// sent to the host only; no election in 20 s of lobby / level board); also with --live, the team name (host's lobby
 // field -> every joiner's lobby / level / end screens -> the leaderboard result, a
 // promoted host keeps it, mixed old/new builds). The rules themselves: tools/sim-test.mjs.
 //
@@ -617,7 +619,25 @@ if (want("cache")) {
 if (want("live")) {
   console.log("live" + (args.relay ? ` (${args.relay})` : " (production relay; leaderboard stubbed)"));
   const room = Array.from({ length: 5 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[(Math.random() * 31) | 0]).join("");
+  { // game.js with one added line that exposes the sim (window.__S): the level board is set directly
+    const fs = await import("node:fs"), path = await import("node:path"), { ROOT } = await import("./harness.mjs");
+    const gsrc = fs.readFileSync(path.join(ROOT, "game.js"), "utf8"), hook = 'S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;';
+    ok(gsrc.includes(hook), "game.js still has the line the test hooks into");
+    server.overrides.set("/game.js", gsrc.replace(hook, hook + " window.__S = S;"));
+  }
   const H = await newPage({ w: 1366, h: 768 }), J = await newPage({ w: 1366, h: 768 });
+  // what goes over the room socket, seen from the page (any build): state received (time, phase), inputs sent (to whom)
+  const wsTrack = () => {
+    const N = window.WebSocket; window.__ws = { st: [], inpTo: [] };
+    window.WebSocket = class extends N {
+      constructor(u, p) {
+        super(u, p);
+        if (/\/room\//.test(String(u))) this.addEventListener("message", (e) => { try { const m = JSON.parse(e.data); if (m.t === "msg" && m.a === "st") window.__ws.st.push([performance.now(), m.d && m.d.phase]); } catch {} });
+      }
+      send(s) { super.send(s); try { const m = JSON.parse(s); if (m.a === "inp") window.__ws.inpTo.push(m.to === undefined ? null : m.to); } catch {} }
+    };
+  };
+  await H.context.addInitScript(wsTrack); await J.context.addInitScript(wsTrack);
   await H.page.goto(url("host.html", `room=${room}`), { waitUntil: "load" });
   await H.page.waitForFunction(() => !!document.getElementById("create"));
   await H.page.fill("#name", "Värden"); await H.page.click("#create");
@@ -654,8 +674,49 @@ if (want("live")) {
   await check("joiner hidden 6 s then visible (lobby)", J.page, async () => { await hidden(J.page, true); await sleep(6000); await hidden(J.page, false); });
   await check("joiner 'online' event (lobby)", J.page, () => J.page.evaluate(() => window.dispatchEvent(new Event("online"))));
   await check("host 'online' event (lobby)", H.page, () => H.page.evaluate(() => window.dispatchEvent(new Event("online"))));
+  // ---- message rates (the relay runs on Cloudflare's free plan: every message a client sends counts):
+  // the host's state at a heartbeat in the lobby and on the level board, 20 Hz in play; a joiner's
+  // position only in play, ~12 Hz while it moves, ~1/s while it stands still, sent to the host only.
+  // And the slower heartbeat never looks like a gone host: no election in 20 s of lobby / level board.
+  const sentN = (pg, a) => pg.evaluate((a) => ((window.livboj.relay().sent || {})[a] || [0])[0], a);
+  const stGaps = (pg, from) => pg.evaluate((from) => { const a = window.__ws.st.slice(from).map((x) => x[0]); return a.slice(1).map((t, i) => Math.round(t - a[i])); }, from);
+  const stN = (pg) => pg.evaluate(() => window.__ws.st.length);
+  async function quietFor(label, ms) {
+    await H.page.evaluate(() => { window.__s.length = 0; }); await J.page.evaluate(() => { window.__s.length = 0; });
+    const h0 = await sentN(H.page, "st"), j0 = await sentN(J.page, "inp"), g0 = await stN(J.page), t0 = Date.now();
+    await sleep(ms);
+    const dt = (Date.now() - t0) / 1000, rate = ((await sentN(H.page, "st")) - h0) / dt, inp = (await sentN(J.page, "inp")) - j0, gaps = await stGaps(J.page, g0);
+    const hs = await H.page.evaluate(() => window.__s), js = await J.page.evaluate(() => window.__s);
+    ok(rate > 1.2 && rate < 2.4, `${label}: the host sends its state at the heartbeat (~1.7/s, not 20/s)`, `${rate.toFixed(2)}/s`);
+    ok(gaps.length > 10 && Math.max(...gaps) < 1300, `${label}: the joiner still gets state at least every 1.3 s (an election waits 3 s)`, `max gap ${Math.max(...gaps)} ms, ${gaps.length} gaps`);
+    ok(hs.length > 300 && hs.every((s) => s.auth && s.n === 2) && js.every((s) => !s.auth && !s.promoted), `${label}: no host election, the roster stays 2`, `${hs.length} + ${js.length} samples`);
+    ok(inp === 0, `${label}: the joiner sends no position`, `${inp} sent`);
+  }
+  await quietFor("20 s in the lobby", 20000);
   await H.page.click("#start");
-  await J.page.waitForFunction(() => ["intro", "play"].includes(window.livboj.debug().phase), null, { timeout: 10000 });
+  await J.page.waitForFunction(() => window.livboj.debug().phase === "play", null, { timeout: 10000 });
+  {
+    const h0 = await sentN(H.page, "st"), t0 = Date.now();
+    await sleep(3000);
+    const rate = ((await sentN(H.page, "st")) - h0) / ((Date.now() - t0) / 1000);
+    ok(rate > 16 && rate < 23, "in play the host sends its state at 20 Hz", `${rate.toFixed(1)}/s`);
+    let j0 = await sentN(J.page, "inp"), t1 = Date.now();
+    await sleep(6000);
+    const still = ((await sentN(J.page, "inp")) - j0) / ((Date.now() - t1) / 1000);
+    ok(still > 0.6 && still < 1.5, "a joiner standing still sends its position at the heartbeat (~1/s)", `${still.toFixed(2)}/s`);
+    j0 = await sentN(J.page, "inp"); t1 = Date.now();
+    await J.page.keyboard.down("ArrowRight"); await sleep(1000); await J.page.keyboard.up("ArrowRight");
+    await J.page.keyboard.down("ArrowLeft"); await sleep(1000); await J.page.keyboard.up("ArrowLeft");
+    const moving = ((await sentN(J.page, "inp")) - j0) / ((Date.now() - t1) / 1000);
+    ok(moving > 8 && moving < 13.5, "a moving joiner sends its position at ~12 Hz", `${moving.toFixed(1)}/s`);
+    const hostId = await H.page.evaluate(() => window.livboj.debug().hostId), tos = await J.page.evaluate(() => window.__ws.inpTo);
+    ok(!!hostId && tos.length > 10 && tos.every((t) => t === hostId), "every input goes to the host only (to = the host's id)", `${tos.length} sent, to ${[...new Set(tos)].join("/")} (host ${hostId})`);
+  }
+  await H.page.evaluate(() => { const S = window.__S; S.caught = 99; S.phase = "cleared"; });
+  await J.page.waitForFunction(() => window.livboj.debug().phase === "cleared", null, { timeout: 5000 });
+  await quietFor("20 s on the level board", 20000);
+  await H.page.keyboard.press("Enter"); // on to level 2
+  await J.page.waitForFunction(() => ["intro", "play"].includes(window.livboj.debug().phase) && window.livboj.debug().level === 1, null, { timeout: 10000 });
   await check("joiner hidden 6 s then visible (in game)", J.page, async () => { await hidden(J.page, true); await sleep(6000); await hidden(J.page, false); });
   await check("host 'online' event (in game)", H.page, () => H.page.evaluate(() => window.dispatchEvent(new Event("online"))));
   console.log("        rosters:", JSON.stringify(await names()));
@@ -671,6 +732,7 @@ if (want("live")) {
   ok(JSON.stringify(m1.mon.map((m) => m.slice(0, 2))) !== JSON.stringify(m2.mon.map((m) => m.slice(0, 2))) && m2.mon.every((m) => Number.isFinite(m[0]) && Number.isFinite(m[1])), "…and they keep swimming under the new host", JSON.stringify(m2.mon.map((m) => m.slice(0, 2))));
   ok(m2.phase === "play" && !J.errors.length, "…the level goes on, no errors", `phase ${m2.phase} ${J.errors.join(" | ")}`);
   await J.context.close();
+  server.overrides.delete("/game.js");
 }
 
 // ---------------------------------------------------------------- the team's name (live relay, leaderboard stubbed)
