@@ -171,23 +171,35 @@
   html.is-fs .sea { background: #04141d; }
   html.is-fs .sea::before, html.is-fs .sea::after { display: none; }
   html.is-fs .stage canvas { border-radius: 0; box-shadow: none; }
-  /* Fullscreen toggle: right of the canvas-drawn mute icon (logical 28,572 r16 + 8 hit slop) */
-  .fsbtn { --s: clamp(32px, 4vmin, 42px); position: absolute; left: 6.6%; bottom: calc(4.667% - var(--s) / 2); width: var(--s); height: var(--s);
-    display: grid; place-items: center; padding: 0; border-radius: 10px; cursor: pointer; color: var(--ink); opacity: 0.8;
-    background: rgba(9, 40, 56, 0.55); border: 1px solid rgba(255, 255, 255, 0.18); -webkit-tap-highlight-color: transparent; }
-  .fsbtn:hover, .fsbtn:focus-visible { opacity: 1; outline: none; border-color: rgba(255, 255, 255, 0.4); }
-  .fsbtn svg { width: 62%; height: 62%; }
+  /* Fullscreen toggle: a round glass button right of the canvas-drawn mute button, in the HUD's
+     button family (hud.js). --u is one HUD unit in css px — hud.js: u = min(1.4, max(1, 0.92 / s)),
+     s = canvas css px per logical px, so u*s = min(1.4 s, max(s, 0.92px)); 0.1111% of the stage width = s.
+     Mute: r 20u at 12u from the bottom-left corner; this button: 40u wide, 12u gap, same row.
+     (Margins in % are taken from the width, even vertical ones.) A ::before widens the touch target. */
+  .fsbtn { --u: min(0.15556%, max(0.11111%, 0.92px)); position: absolute; left: 0; bottom: 0; margin: 0 0 calc(12 * var(--u)) calc(64 * var(--u));
+    width: calc(40 * var(--u)); height: auto; aspect-ratio: 1; display: grid; place-items: center; padding: 0; border-radius: 50%; cursor: pointer; color: #fff;
+    background: linear-gradient(180deg, rgba(18, 56, 78, 0.74), rgba(5, 24, 37, 0.82)); border: 1px solid rgba(190, 230, 250, 0.3);
+    box-shadow: 0 3px 12px rgba(0, 8, 16, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12); -webkit-tap-highlight-color: transparent;
+    transition: transform 0.12s, border-color 0.12s, background 0.12s; }
+  .fsbtn::before { content: ""; position: absolute; inset: -6px; border-radius: 50%; }
+  .fsbtn:hover, .fsbtn:focus-visible { outline: none; border-color: rgba(220, 240, 255, 0.55); transform: scale(1.05);
+    background: linear-gradient(180deg, rgba(24, 66, 90, 0.86), rgba(6, 28, 42, 0.9)); }
+  .fsbtn:active { transform: scale(0.92); }
+  .fsbtn svg { width: 50%; height: 50%; }
   /* a tall window: the canvas is width-limited and small, with room below it — the button goes there */
-  @media (max-aspect-ratio: 1/1) { .fsbtn { left: 0; bottom: auto; top: calc(100% + 10px); opacity: 0.9; } }
-  /* "Vrid mobilen" over the game on a phone held upright (the game runs on underneath) */
-  .rotatecard { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: 6px;
-    padding: 14px 18px; border-radius: 16px; text-align: center; cursor: pointer; width: max-content; max-width: 86%;
-    background: rgba(9, 40, 56, 0.92); border: 1px solid var(--line); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6); color: var(--ink);
+  @media (max-aspect-ratio: 1/1) { .fsbtn { bottom: auto; top: calc(100% + 10px); margin: 0; width: 44px; } }
+  /* "Vrid mobilen" over the game on a phone held upright (the game runs on underneath) — the HUD's glass card */
+  .rotatecard { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: 5px;
+    padding: 16px 22px 14px; border-radius: 22px; text-align: center; cursor: pointer; width: max-content; max-width: 86%;
+    background: linear-gradient(180deg, rgba(18, 56, 78, 0.94), rgba(5, 24, 37, 0.96)); border: 1px solid rgba(190, 230, 250, 0.24);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.12); color: var(--ink);
+    font-family: "Livboj", ui-rounded, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   .rotatecard svg { width: 44px; height: 44px; color: var(--accent); animation: rot 1.8s ease-in-out infinite; }
-  .rotatecard b { font-size: 15px; }
-  .rotatecard span { font-size: 12.5px; color: var(--muted); }
-  .rotatecard small { font-size: 10.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); opacity: 0.8; }
+  .rotatecard b { font-size: 17px; font-weight: 600; }
+  .rotatecard span { font-size: 13px; color: #cfe6f3; }
+  .rotatecard small { margin-top: 4px; padding: 4px 12px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase;
+    color: #fff; background: linear-gradient(180deg, #ff7a3d, #e2470f); box-shadow: 0 2px 8px rgba(244, 87, 29, 0.45); }
   @keyframes rot { 0%, 20% { transform: rotate(0); } 50%, 70% { transform: rotate(-90deg); } 100% { transform: rotate(0); } }
 </style>
 </head>

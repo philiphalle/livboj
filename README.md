@@ -15,8 +15,10 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | `host.html` | Host page: create a lobby (room code + invite link), start the game, end it. |
 | `game.js` | `createGame()`: wires sim, renderer and network together for solo / host / join — state sync to joiners, host migration, input, the frame loop — plus sound and the page chrome (fullscreen, rotate hint, iOS fixes). |
 | `sim.js` | The rules: levels, world size, spawning, swimmers, monsters, whirlpools, swamps, docks, collisions, scoring, phases. Pure (no DOM, audio, network, storage or clock), so node runs it; solo and the host run it, joiners only draw the host's state. |
-| `render.js` | Everything drawn on the canvas (logical 900×600, HiDPI backing store). |
+| `render.js` | The world drawn on the canvas: water, shore, beach, swamps, docks, swimmers, monsters, rings, gulls (logical 900×600, HiDPI backing store). |
 | `water.js` | The water: a WebGL layer under the game canvas (one fragment shader: depth, caustics, waves, shadows, foam, wakes, the whirlpool) with a 2D fallback of the same look. Steps down in quality when frames are slow; `?water=2d`, `?water=gl` or `?water=low` forces a mode. |
+| `hud.js` | The canvas UI on top: HUD, on-canvas buttons (mute, *Spurt*, *Avsluta spelet*, the screens' buttons), the intro / level / end / lobby screens, vector icons. Scales up on small canvases (phones); the fullscreen button's CSS repeats its formula. |
+| `fonts/` | Fredoka (SIL OFL 1.1, `OFL.txt`), the UI's display face, self-hosted and loaded without blocking (the system font draws until it has arrived). A changed font file gets a new name: it is not fingerprinted by `boot.js`. |
 | `net.js` | The room transports (WebSocket relay, Trystero P2P fallback) and the relay's HTTP endpoints (leaderboard + its localStorage outbox, Förslagslåda). |
 | `boot.js` | Fingerprints every module, loads `game.js?v=<build>` and watches for new builds (see *Deploy*). |
 | `nyheter.json` | The news shown on the start page (see *Nyheter* below). |
@@ -40,7 +42,7 @@ Multiplayer and the leaderboard use the live relay by default; add
 
 - **Keyboard:** arrow keys steer · **Space** dash · **Enter** next level / start (host) · **M** sound on/off · **F** fullscreen
 - **Touch:** drag on the water to steer, tap **Spurt** (bottom right) to dash, tap anywhere to go on between levels (host)
-- **Buttons on the game:** sound (bottom left), fullscreen (next to it), *Avsluta spelet* (host, top right, tap twice)
+- **Buttons on the game:** sound (bottom left), fullscreen (next to it), *Avsluta spelet* (host, top right — bottom right on the level board — tap twice)
 - **Fullscreen:** the button or F on desktop and Android. On iPhone there is no fullscreen in the browser:
   *Dela → Lägg till på hemskärmen* and start it from the home screen (the menu shows that hint on iPhone/iPad).
   Phones held upright get a dismissable *Vrid mobilen* card.

@@ -76,7 +76,8 @@ if (want("layout")) {
       const vis = (el) => !!el && !el.hidden && getComputedStyle(el).display !== "none";
       return { r: { x: r.x, y: r.y, w: r.width, h: r.height }, backW: c.width, backH: c.height, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
         fs: vis(f) ? { x: fr.x, y: fr.y, w: fr.width, h: fr.height } : null, rotate: vis(rc), coarse: matchMedia("(pointer: coarse)").matches,
-        brand: vis(document.getElementById("brand")), hint: !!document.querySelector(".hint") && getComputedStyle(document.querySelector(".hint")).display !== "none" };
+        brand: vis(document.getElementById("brand")), hint: !!document.querySelector(".hint") && getComputedStyle(document.querySelector(".hint")).display !== "none",
+        mute: window.livboj.debug().muteBtn, dash: window.livboj.debug().dashBtn };
     });
     const { r } = m;
     ok(Math.abs(r.w / r.h - 1.5) < 0.01, `${tag}: canvas is 3:2`, `${r.w.toFixed(0)}x${r.h.toFixed(0)}`);
@@ -88,14 +89,14 @@ if (want("layout")) {
     ok(!m.brand && !m.hint, `${tag}: brand header and hint hidden while playing`);
     ok(m.rotate === !!(s.touch && s.h > s.w), `${tag}: rotate card ${s.h > s.w && s.touch ? "shown" : "not shown"}`);
     if (ok(!!m.fs, `${tag}: fullscreen button shown`)) {
-      // in logical 900x600 coords: clear of the mute hit area (28,572 r24), the dash button (834,534 r46),
-      // the HUD rows along the top (y < 64), the host's quit button (768,44 114x24)
+      // in logical 900x600 coords: clear of the mute hit area (r + 8) and the dash button — both laid out
+      // per canvas size by hud.js, read from debug() — the HUD rows along the top (y < 64), the host's quit button area
       const k = 900 / r.w, L = { x: (m.fs.x - r.x) * k, y: (m.fs.y - r.y) * k, w: m.fs.w * k, h: m.fs.h * k };
       const circleHit = (cx, cy, rr) => { const nx = Math.max(L.x, Math.min(cx, L.x + L.w)), ny = Math.max(L.y, Math.min(cy, L.y + L.h)); return Math.hypot(nx - cx, ny - cy) < rr; };
       const inside = L.x >= 0 && L.y >= 0 && L.x + L.w <= 900.5 && L.y + L.h <= 600.5;
       const outside = (L.y >= 600 || L.x >= 900 || L.x + L.w <= 0 || L.y + L.h <= 0) && m.fs.x >= 0 && m.fs.y >= 0 && m.fs.x + m.fs.w <= m.vw && m.fs.y + m.fs.h <= m.vh;
-      ok(outside || inside && !circleHit(28, 572, 24) && !circleHit(834, 534, 46) && L.y > 64 && !(L.x < 882 && L.x + L.w > 768 && L.y < 68 && L.y + L.h > 44),
-        `${tag}: fullscreen button clear of HUD/mute/dash/quit (or outside the canvas, on screen)`, `logical box ${L.x.toFixed(0)},${L.y.toFixed(0)} ${L.w.toFixed(0)}x${L.h.toFixed(0)}`);
+      ok(outside || inside && !circleHit(m.mute.x, m.mute.y, m.mute.r + 8) && !circleHit(m.dash.x, m.dash.y, m.dash.r) && L.y > 64 && !(L.x < 882 && L.x + L.w > 768 && L.y < 68 && L.y + L.h > 44),
+        `${tag}: fullscreen button clear of HUD/mute/dash/quit (or outside the canvas, on screen)`, `logical box ${L.x.toFixed(0)},${L.y.toFixed(0)} ${L.w.toFixed(0)}x${L.h.toFixed(0)}; mute ${m.mute.x.toFixed(0)},${m.mute.y.toFixed(0)} r${m.mute.r.toFixed(0)}`);
     }
     if (s.touch && s.h > s.w) { // a tap closes the card, the game keeps running
       await page.tap("#rotateCard");
