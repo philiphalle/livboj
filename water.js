@@ -403,7 +403,7 @@ export function createWater(canvas2d, CW, CH) {
     const cssW = canvas2d.clientWidth;
     if (!cssW) return false;
     // soft content: its own (lower) resolution cap
-    const k = Math.min(window.devicePixelRatio || 1, coarse.matches ? 1.25 : 1.25) * [1, 0.75, 0.6][level];
+    const k = Math.min(window.devicePixelRatio || 1, 1.25) * [1, 0.75, 0.6][level]; // (width capped below: 1400 on touch devices, 1920 elsewhere)
     const gw = Math.max(64, Math.round(Math.min(cssW * k, coarse.matches ? 1400 : 1920))), gh = Math.round(gw * CH / CW);
     if (glc.width !== gw || glc.height !== gh) { glc.width = gw; glc.height = gh; graceUntil = now + 1000; }
     if (size[0] !== gw || size[1] !== gh) size = [gw, gh];
