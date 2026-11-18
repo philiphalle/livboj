@@ -216,6 +216,41 @@ async function postGlobalBoard(entries) {
   if (!RELAY_HTTP || !entries.length) return null;
   try { const r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries }) }); if (!r.ok) return null; const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
 }
+// Outbox for finished games: a result goes into localStorage first and leaves
+// it only once the relay has taken it (or refused it with a 4xx), so a result
+// survives a dead network, a closed tab or a crash. Flushed when a game ends,
+// on every page load and when the browser comes back online. The relay dedupes
+// by entry id, so a re-sent entry can never appear twice.
+const QUEUE_KEY = "livboj-board-queue";
+const loadQueue = () => { try { const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); return Array.isArray(q) ? q : []; } catch { return []; } };
+const saveQueue = (q) => { try { if (q.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(q.slice(-100))); else localStorage.removeItem(QUEUE_KEY); } catch {} };
+function queueResult(entry) { if (!RELAY_HTTP) return; const q = loadQueue(); if (!q.some((e) => e.id === entry.id)) { q.push(entry); saveQueue(q); } }
+let flushing = null;
+// -> the merged global list after a successful post, else null (the queue keeps what was not taken)
+function flushBoardQueue() {
+  if (!RELAY_HTTP) return Promise.resolve(null);
+  if (flushing) return flushing.then((m) => (loadQueue().length ? flushBoardQueue() : m)); // a result queued mid-flight goes next
+  const batch = loadQueue().slice(0, 50);
+  if (!batch.length) return Promise.resolve(null);
+  flushing = (async () => {
+    for (let k = 0; k < 2; k++) {
+      if (k) await new Promise((r) => setTimeout(r, 2000)); // one retry, shortly after
+      let r;
+      try { r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries: batch }), keepalive: true }); } catch { continue; } // offline: retry once
+      const sent = new Set(batch.map((e) => e.id));
+      if (r.status >= 400 && r.status < 500) { saveQueue(loadQueue().filter((e) => !sent.has(e.id))); return null; } // refused: drop, no retry loop
+      if (!r.ok) continue;
+      saveQueue(loadQueue().filter((e) => !sent.has(e.id)));
+      try { const d = await r.json(); return Array.isArray(d.entries) ? d.entries : null; } catch { return null; }
+    }
+    return null;
+  })().finally(() => { flushing = null; });
+  return flushing;
+}
+// whatever an earlier page load could not deliver
+flushBoardQueue();
+addEventListener("online", () => { flushBoardQueue(); });
+
 
 // ---- Water texture ---------------------------------------------------------
 // A seamless value-noise tile of soft light filaments, scrolled in two layers
@@ -485,8 +520,9 @@ export function createGame(canvas, opts) {
     });
     board.push(entry); sortBoard(board); board = board.slice(0, 50);
     saveBoardLS(board); emitBoard();
-    // solo, host and a promoted host all post; joiners never do
-    if (authoritative) postGlobalBoard([entry]).then((merged) => { if (merged) adoptBoard(merged, "global"); });
+    // solo, host and a promoted host all post; joiners never do. Queued first,
+    // so a failed post is retried on the next page load / when back online.
+    if (authoritative) { queueResult(entry); flushBoardQueue().then((merged) => { if (merged) adoptBoard(merged, "global"); }); }
   }
   function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); } // local cache only
 
