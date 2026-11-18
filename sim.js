@@ -14,9 +14,15 @@
 // No imports on purpose: node runs this file as-is (tools/sim-test.mjs).
 
 export const MAX_PLAYERS = 12;
-export const SHORE_H = 70; // beach band along the bottom; rescued swimmers gather here
+// Beach band along the bottom; rescued swimmers gather here. 60 on the 2:1 worlds (the share of the
+// height the 70 took on the old 3:2 ones, so the water keeps its area). A 3:2 world can still arrive
+// from a host on the previous build (a deploy takes ~10 min to reach everyone): it keeps its 70, so a
+// joiner draws exactly the beach that host plays on.
+export const SHORE_H = 60;
+export const LEGACY_SHORE_H = 70;
+export const shoreH = (w) => (w.w < w.h * 1.75 ? LEGACY_SHORE_H : SHORE_H);
 export const EAT_DWELL = 1.25; // seconds a monster must hold a swimmer before eating it
-export const shoreY = (w) => w.h - SHORE_H; // y where the water meets the sand
+export const shoreY = (w) => w.h - shoreH(w); // y where the water meets the sand
 
 export const Phase = { LOBBY: "lobby", INTRO: "intro", PLAY: "play", CLEARED: "cleared", OVER: "over", WIN: "win" };
 
@@ -35,7 +41,14 @@ export const SKINS = ["#f7d3ad", "#e8b98f", "#c98d61", "#a86a44", "#f2c39b"];
 export const HAIRS = ["#3a2a1c", "#221b16", "#6b4a2a", "#0f0f10", "#8a5a2b", "#c9a24a"];
 export const HUES = [28, 205, 140, 320, 52, 265, 0, 175, 95, 235, 300, 185];
 
-export function worldSize(n) { return { w: Math.min(900 + (n - 1) * 170, 1560), h: Math.min(600 + (n - 1) * 120, 1040) }; }
+// The world is 2:1 (it fills a phone held sideways and a desktop window) and grows with the number of
+// players in the same steps of water area as the old 3:2 worlds did (900x600 growing to 1560x1040),
+// so swimmer density, travel and monster pressure stay what they were: 1040x520 alone … 1800x900 from 5.
+export function worldSize(n) {
+  const area = Math.min(900 + (n - 1) * 170, 1560) * Math.min(600 + (n - 1) * 120, 1040);
+  const h = 2 * Math.round(Math.sqrt(area / 2) / 2);
+  return { w: 2 * h, h };
+}
 export function levelParams(idx, n) {
   const L = BASE_LEVELS[idx];
   return {
@@ -47,18 +60,24 @@ export function levelParams(idx, n) {
     allowedMisses: L.allowedMisses + (n - 1),
   };
 }
+// Layouts are drawn up on the one-player world, 1040x520 with the water from y 0 to 460 (REF), and
+// stretched to the water of a bigger world: x by its width, y by its water height. So a pier that
+// runs out from the beach (its end on y 460) meets the sand in every world, and every gap (to the
+// beach, the edges, the next dock: never under 70, a ring is 60 across) only grows with the world.
+const REF_W = 1040, REF_WATER = 460;
+const layoutScale = (w, h) => ({ sx: w / REF_W, sy: (h - SHORE_H) / REF_WATER });
 export function makeObstacles(idx, w, h) {
   const specs = [
     [], // 1 — open water
-    [{ x: 130, y: 150, w: 230, h: 34 }], // 2
-    [{ x: 90, y: 140, w: 320, h: 34 }, { x: 620, y: 290, w: 40, h: 230 }], // 3
-    [{ x: 80, y: 120, w: 300, h: 34 }, { x: 560, y: 150, w: 40, h: 290 }, { x: 300, y: 440, w: 340, h: 36 }], // 4
-    [{ x: 70, y: 110, w: 280, h: 32 }, { x: 660, y: 120, w: 40, h: 270 }, { x: 120, y: 445, w: 320, h: 34 }, { x: 560, y: 370, w: 40, h: 170 }], // 5
-    [{ x: 60, y: 100, w: 380, h: 32 }, { x: 660, y: 110, w: 40, h: 300 }, { x: 120, y: 300, w: 40, h: 220 }, { x: 300, y: 450, w: 360, h: 34 }], // 6
-    [{ x: 80, y: 110, w: 320, h: 32 }, { x: 500, y: 110, w: 320, h: 32 }, { x: 80, y: 300, w: 40, h: 240 }, { x: 410, y: 270, w: 40, h: 270 }, { x: 200, y: 470, w: 440, h: 32 }], // 7
-    [{ x: 60, y: 100, w: 420, h: 30 }, { x: 560, y: 100, w: 300, h: 30 }, { x: 80, y: 250, w: 40, h: 300 }, { x: 300, y: 230, w: 40, h: 320 }, { x: 520, y: 300, w: 40, h: 260 }, { x: 160, y: 480, w: 520, h: 30 }], // 8 — dense maze
+    [{ x: 150, y: 128, w: 266, h: 34 }], // 2
+    [{ x: 104, y: 119, w: 370, h: 34 }, { x: 720, y: 252, w: 40, h: 208 }], // 3
+    [{ x: 92, y: 102, w: 400, h: 34 }, { x: 650, y: 130, w: 40, h: 226 }, { x: 347, y: 354, w: 393, h: 36 }], // 4
+    [{ x: 81, y: 93, w: 324, h: 32 }, { x: 766, y: 104, w: 40, h: 234 }, { x: 139, y: 356, w: 370, h: 34 }, { x: 650, y: 321, w: 40, h: 139 }], // 5
+    [{ x: 69, y: 85, w: 439, h: 32 }, { x: 766, y: 95, w: 40, h: 263 }, { x: 142, y: 260, w: 40, h: 200 }, { x: 347, y: 356, w: 343, h: 34 }], // 6
+    [{ x: 92, y: 93, w: 370, h: 32 }, { x: 578, y: 93, w: 370, h: 32 }, { x: 96, y: 260, w: 40, h: 200 }, { x: 370, y: 234, w: 40, h: 226 }, { x: 230, y: 356, w: 320, h: 32 }], // 7
+    [{ x: 69, y: 85, w: 485, h: 30 }, { x: 647, y: 85, w: 323, h: 30 }, { x: 96, y: 217, w: 40, h: 243 }, { x: 350, y: 200, w: 40, h: 186 }, { x: 604, y: 290, w: 40, h: 96 }, { x: 350, y: 356, w: 294, h: 30 }], // 8 — dense maze
   ];
-  const sx = w / 900, sy = h / 600;
+  const { sx, sy } = layoutScale(w, h);
   return (specs[idx] || []).map((o) => ({ x: o.x * sx, y: o.y * sy, w: o.w * sx, h: o.h * sy }));
 }
 // Swamp zones (level 4+): murky patches where the livboj moves slowly.
@@ -66,20 +85,20 @@ export function makeObstacles(idx, w, h) {
 export function makeSwamps(idx, w, h) {
   const specs = [
     [], [], [],
-    [{ x: 60, y: 300, w: 260, h: 180 }], // 4
-    [{ x: 560, y: 60, w: 300, h: 200 }], // 5
-    [{ x: 40, y: 60, w: 280, h: 200 }, { x: 600, y: 320, w: 260, h: 180 }], // 6
-    [{ x: 520, y: 40, w: 340, h: 190 }, { x: 40, y: 340, w: 300, h: 170 }], // 7
-    [{ x: 40, y: 40, w: 300, h: 180 }, { x: 580, y: 200, w: 280, h: 190 }, { x: 220, y: 330, w: 200, h: 170 }], // 8
+    [{ x: 69, y: 260, w: 300, h: 156 }], // 4
+    [{ x: 647, y: 52, w: 347, h: 174 }], // 5
+    [{ x: 46, y: 52, w: 324, h: 174 }, { x: 693, y: 278, w: 300, h: 156 }], // 6
+    [{ x: 601, y: 30, w: 393, h: 160 }, { x: 46, y: 295, w: 347, h: 148 }], // 7
+    [{ x: 46, y: 35, w: 347, h: 156 }, { x: 670, y: 174, w: 324, h: 165 }, { x: 254, y: 286, w: 231, h: 148 }], // 8
   ];
-  const sx = w / 900, sy = h / 600;
+  const { sx, sy } = layoutScale(w, h);
   return (specs[idx] || []).map((z) => ({ x: z.x * sx, y: z.y * sy, w: z.w * sx, h: z.h * sy }));
 }
 // Whirlpools (levels 6 and 7): slowly draw swimmers toward the centre; one that
 // reaches the core is lost (counts as a miss). The livboj feels a weaker pull.
 export function makeWhirls(idx, w, h) {
-  const specs = [[], [], [], [], [], [{ x: 530, y: 240, r: 90 }], [{ x: 660, y: 360, r: 100 }], []]; // clear of docks, swamps and the spawn ring
-  const sx = w / 900, sy = h / 600;
+  const specs = [[], [], [], [], [], [{ x: 612, y: 208, r: 90 }], [{ x: 830, y: 300, r: 100 }], []]; // clear of docks and swamps, never across the whole water
+  const { sx, sy } = layoutScale(w, h);
   return (specs[idx] || []).map((z) => ({ x: z.x * sx, y: z.y * sy, r: z.r * Math.min(sx, sy) }));
 }
 export const WHIRL_PULL = 30, WHIRL_SPIN = 55, WHIRL_PLAYER = 0.35, WHIRL_CORE = 0.16;
@@ -180,7 +199,8 @@ export function createSim({ rng = Math.random, selfId = () => null, selfPos = { 
     for (let k = 0; k < mc; k++) {
       const edge = k % 4, m = 70;
       let x = m + rng() * (S.world.w - m * 2), y = m + rng() * (S.world.h - m * 2);
-      if (edge === 0) y = m; else if (edge === 1) y = S.world.h - m; else if (edge === 2) x = m; else x = S.world.w - m;
+      // (the bottom edge is the waterline, where the old y = h - 70 ended up after the first step on a 3:2 world)
+      if (edge === 0) y = m; else if (edge === 1) y = shoreY(S.world) - 30; else if (edge === 2) x = m; else x = S.world.w - m;
       const a = rng() * Math.PI * 2;
       S.monsters.push({ id: S.monsterSeq++, x, y, vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, r: 30, wob: rng() * 6, dir: a });
     }

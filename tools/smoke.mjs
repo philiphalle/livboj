@@ -3,12 +3,14 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,water,hud,keys,board,cache,menu,forslag,live
+//   node tools/smoke.mjs --only layout,fullscreen,water,hud,buttons,keys,board,cache,menu,forslag,live
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
-// 3:2, inside the viewport, >= 90 % of the limiting side, backing store caps,
-// "Vrid mobilen" in portrait, the fullscreen button clear of the HUD); a swimmer
+// 2:1, inside the viewport, >= 90 % of the limiting side, backing store caps,
+// the water layer on the same box, "Vrid mobilen" in portrait, the fullscreen
+// button clear of the HUD, the "F helskärm" chip on desktops only); real clicks
+// and taps on every on-canvas button and the fullscreen button; a swimmer
 // or monster under a HUD piece turns that piece see-through (and back); the menu
 // usable and scrollable on phones; fullscreen by a real click and by F (not
 // while typing); blur releases held keys; the leaderboard outbox (a failed post
@@ -61,8 +63,9 @@ const waitPlay = (page) => page.waitForFunction(() => window.livboj && window.li
 if (want("layout")) {
   console.log("layout");
   const sizes = [
-    { w: 1920, h: 1080, dsf: 2 }, { w: 2560, h: 1440, dsf: 2 }, { w: 1366, h: 768, dsf: 1 },
-    { w: 844, h: 390, dsf: 3, touch: true }, { w: 390, h: 844, dsf: 3, touch: true },
+    { w: 1920, h: 1080, dsf: 2 }, { w: 1920, h: 950, dsf: 1 }, { w: 2560, h: 1440, dsf: 2 }, { w: 1366, h: 768, dsf: 1 },
+    { w: 1024, h: 768, dsf: 2, touch: true }, // iPad
+    { w: 844, h: 390, dsf: 3, touch: true }, { w: 932, h: 430, dsf: 3, touch: true }, { w: 390, h: 844, dsf: 3, touch: true },
   ];
   for (const s of sizes) {
     const tag = `${s.w}x${s.h}@${s.dsf}${s.touch ? " touch" : ""}`;
@@ -73,30 +76,44 @@ if (want("layout")) {
     const m = await page.evaluate(() => {
       const c = document.getElementById("game"), r = c.getBoundingClientRect();
       const f = document.getElementById("fsBtn"), fr = f.getBoundingClientRect();
-      const rc = document.getElementById("rotateCard");
+      const rc = document.getElementById("rotateCard"), wl = document.querySelector("#stage canvas.water"), wr = wl && wl.getBoundingClientRect();
       const vis = (el) => !!el && !el.hidden && getComputedStyle(el).display !== "none";
+      const hint = document.getElementById("fsHint"), hr = hint && hint.getBoundingClientRect();
       return { r: { x: r.x, y: r.y, w: r.width, h: r.height }, backW: c.width, backH: c.height, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
+        water: wl && vis(wl) ? { x: wr.x, y: wr.y, w: wr.width, h: wr.height } : null, quit: window.livboj.debug().quitBtn,
+        fsHint: hint && hint.classList.contains("on") ? { x: hr.x, y: hr.y, w: hr.width, h: hr.height } : null,
+        shore: (() => { const f = window.livboj.debug().fit; return f.oy + 460 * f.s; })(), // the waterline of the solo world (1040x520, beach 60), logical px
         fs: vis(f) ? { x: fr.x, y: fr.y, w: fr.width, h: fr.height } : null, rotate: vis(rc), coarse: matchMedia("(pointer: coarse)").matches,
         brand: vis(document.getElementById("brand")), hint: !!document.querySelector(".hint") && getComputedStyle(document.querySelector(".hint")).display !== "none",
         mute: window.livboj.debug().muteBtn, dash: window.livboj.debug().dashBtn };
     });
     const { r } = m;
-    ok(Math.abs(r.w / r.h - 1.5) < 0.01, `${tag}: canvas is 3:2`, `${r.w.toFixed(0)}x${r.h.toFixed(0)}`);
+    ok(Math.abs(r.w / r.h - 2) < 0.01, `${tag}: canvas is 2:1`, `${r.w.toFixed(0)}x${r.h.toFixed(0)}`);
     ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= m.vw + 0.5 && r.y + r.h <= m.vh + 0.5, `${tag}: canvas inside the viewport`);
     const use = Math.max(r.w / m.vw, r.h / m.vh);
     ok(use >= 0.9, `${tag}: canvas uses >= 90% of the limiting side`, `${(use * 100).toFixed(1)}%`);
-    const cap = m.coarse ? 1.5 : 2, expectW = Math.round(r.w * Math.min(m.dpr, cap, 2560 / r.w));
-    ok(m.backW <= 2560 && m.backW / r.w <= cap + 0.01 && Math.abs(m.backW - expectW) <= 1, `${tag}: backing store capped`, `backing ${m.backW}x${m.backH}, ratio ${(m.backW / r.w).toFixed(2)} (dpr ${m.dpr}, cap ${cap}, max 2560)`);
+    const cap = m.coarse ? 1.5 : 2, expectW = Math.round(r.w * Math.min(m.dpr, cap, 2960 / r.w));
+    ok(m.backW <= 2960 && m.backW / r.w <= cap + 0.01 && Math.abs(m.backW - expectW) <= 1 && Math.abs(m.backW - 2 * m.backH) <= 1, `${tag}: backing store 2:1, capped`, `backing ${m.backW}x${m.backH}, ratio ${(m.backW / r.w).toFixed(2)} (dpr ${m.dpr}, cap ${cap}, max 2960 wide)`);
+    if (m.water) ok(["x", "y", "w", "h"].every((k) => Math.abs(m.water[k] - r[k]) < 0.01), `${tag}: the water layer covers exactly the game canvas`, JSON.stringify(m.water));
+    else ok(true, `${tag}: (2D water here: one canvas)`);
+    // the "F helskärm" chip: a desktop that is not fullscreen gets it when the game starts, a touch device never
+    if (s.touch) ok(!m.fsHint, `${tag}: no "F helskärm" chip on a touch device`);
+    else if (ok(!!m.fsHint, `${tag}: "F helskärm" chip shown on a desktop`)) {
+      const k = 1200 / r.w, H = { x: (m.fsHint.x - r.x) * k, y: (m.fsHint.y - r.y) * k, w: m.fsHint.w * k, h: m.fsHint.h * k };
+      const fsR = m.fs ? (m.fs.x - r.x + m.fs.w) * k : 0;
+      ok(H.x >= fsR && H.y + H.h <= 600 && H.y >= m.shore && H.x + H.w < 600 && !(H.x < m.dash.x + m.dash.r && H.x + H.w > m.dash.x - m.dash.r && H.y + H.h > m.dash.y - m.dash.r),
+        `${tag}: …beside the fullscreen button, on the beach row (below the waterline), clear of the HUD`, `logical ${H.x.toFixed(0)},${H.y.toFixed(0)} ${H.w.toFixed(0)}x${H.h.toFixed(0)}`);
+    }
     ok(!m.brand && !m.hint, `${tag}: brand header and hint hidden while playing`);
     ok(m.rotate === !!(s.touch && s.h > s.w), `${tag}: rotate card ${s.h > s.w && s.touch ? "shown" : "not shown"}`);
     if (ok(!!m.fs, `${tag}: fullscreen button shown`)) {
-      // in logical 900x600 coords: clear of the mute hit area (r + 8) and the dash button — both laid out
-      // per canvas size by hud.js, read from debug() — the HUD rows along the top (y < 64), the host's quit button area
-      const k = 900 / r.w, L = { x: (m.fs.x - r.x) * k, y: (m.fs.y - r.y) * k, w: m.fs.w * k, h: m.fs.h * k };
+      // in logical 1200x600 coords: clear of the mute hit area (r + 8) and the dash button — both laid out
+      // per canvas size by hud.js, read from debug() — the HUD rows along the top (y < 64), the host's quit button
+      const k = 1200 / r.w, L = { x: (m.fs.x - r.x) * k, y: (m.fs.y - r.y) * k, w: m.fs.w * k, h: m.fs.h * k }, q = m.quit;
       const circleHit = (cx, cy, rr) => { const nx = Math.max(L.x, Math.min(cx, L.x + L.w)), ny = Math.max(L.y, Math.min(cy, L.y + L.h)); return Math.hypot(nx - cx, ny - cy) < rr; };
-      const inside = L.x >= 0 && L.y >= 0 && L.x + L.w <= 900.5 && L.y + L.h <= 600.5;
-      const outside = (L.y >= 600 || L.x >= 900 || L.x + L.w <= 0 || L.y + L.h <= 0) && m.fs.x >= 0 && m.fs.y >= 0 && m.fs.x + m.fs.w <= m.vw && m.fs.y + m.fs.h <= m.vh;
-      ok(outside || inside && !circleHit(m.mute.x, m.mute.y, m.mute.r + 8) && !circleHit(m.dash.x, m.dash.y, m.dash.r) && L.y > 64 && !(L.x < 882 && L.x + L.w > 768 && L.y < 68 && L.y + L.h > 44),
+      const inside = L.x >= 0 && L.y >= 0 && L.x + L.w <= 1200.5 && L.y + L.h <= 600.5;
+      const outside = (L.y >= 600 || L.x >= 1200 || L.x + L.w <= 0 || L.y + L.h <= 0) && m.fs.x >= 0 && m.fs.y >= 0 && m.fs.x + m.fs.w <= m.vw && m.fs.y + m.fs.h <= m.vh;
+      ok(outside || inside && !circleHit(m.mute.x, m.mute.y, m.mute.r + 8) && !circleHit(m.dash.x, m.dash.y, m.dash.r) && L.y > 64 && !(L.x < q.x + q.w && L.x + L.w > q.x && L.y < q.y + q.h && L.y + L.h > q.y),
         `${tag}: fullscreen button clear of HUD/mute/dash/quit (or outside the canvas, on screen)`, `logical box ${L.x.toFixed(0)},${L.y.toFixed(0)} ${L.w.toFixed(0)}x${L.h.toFixed(0)}; mute ${m.mute.x.toFixed(0)},${m.mute.y.toFixed(0)} r${m.mute.r.toFixed(0)}`);
     }
     if (s.touch && s.h > s.w) { // a tap closes the card, the game keeps running
@@ -108,7 +125,7 @@ if (want("layout")) {
     await page.setViewportSize({ width: Math.round(s.w * 0.7), height: Math.round(s.h * 0.7) });
     await sleep(300);
     const after = await page.evaluate(() => ({ cw: document.getElementById("game").clientWidth, bw: document.getElementById("game").width }));
-    ok(Math.abs(after.bw - Math.round(after.cw * Math.min(s.dsf, s.touch ? 1.5 : 2, 2560 / after.cw))) <= 1, `${tag}: backing follows a resize`, `css ${after.cw} -> backing ${after.bw}`);
+    ok(Math.abs(after.bw - Math.round(after.cw * Math.min(s.dsf, s.touch ? 1.5 : 2, 2960 / after.cw))) <= 1, `${tag}: backing follows a resize`, `css ${after.cw} -> backing ${after.bw}`);
     ok(!errors.length, `${tag}: no console/page errors`, errors.join(" | "));
     await context.close();
   }
@@ -162,7 +179,7 @@ if (want("menu")) {
 // ---------------------------------------------------------------- fullscreen
 if (want("fullscreen")) {
   console.log("fullscreen");
-  const { context, page, errors } = await newPage({ w: 1366, h: 768 });
+  const { context, page, errors } = await newPage({ w: 1920, h: 1080 });
   await openMenu(page);
   await page.click("#name"); await page.keyboard.type("Fia F");
   ok(await page.evaluate(() => !document.fullscreenElement && document.getElementById("name").value === "Fia F"), "F typed into the name field: no fullscreen, the text is typed");
@@ -175,13 +192,23 @@ if (want("fullscreen")) {
   ok(fsOn.el === "HTML" && fsOn.cls, "real click on the button enters fullscreen", JSON.stringify(fsOn));
   ok(fsOn.label === "Avsluta helskärm" && fsOn.active !== "fsBtn", "button label flips, button gives up focus (Space/Enter stay game keys)");
   const inFs = await page.evaluate(() => { const r = document.getElementById("game").getBoundingClientRect(); return { w: r.width, h: r.height, vw: innerWidth, vh: innerHeight }; });
-  ok(Math.abs(inFs.w / inFs.h - 1.5) < 0.01 && Math.max(inFs.w / inFs.vw, inFs.h / inFs.vh) >= 0.9, "in fullscreen the canvas is 3:2 and fills the screen", `${inFs.w}x${inFs.h} in ${inFs.vw}x${inFs.vh}`);
+  ok(Math.abs(inFs.w / inFs.h - 2) < 0.01 && Math.max(inFs.w / inFs.vw, inFs.h / inFs.vh) >= 0.9, "in fullscreen the canvas is 2:1 and fills the screen", `${inFs.w}x${inFs.h} in ${inFs.vw}x${inFs.vh}`);
+  // 16:9: a band above and below the 2:1 field — the page's sea, the field centred, nothing pushed off screen
+  const band = await page.evaluate(() => {
+    const r = document.getElementById("game").getBoundingClientRect(), b = document.getElementById("fsBtn").getBoundingClientRect(), sea = getComputedStyle(document.querySelector(".sea"));
+    const seaAfter = getComputedStyle(document.querySelector(".sea"), "::before").display;
+    return { top: r.top, bottom: innerHeight - r.bottom, vh: innerHeight, vw: innerWidth, sea: sea.backgroundImage, swell: seaAfter, fs: [b.left, b.top, b.right, b.bottom] };
+  });
+  ok(band.top > 20 && Math.abs(band.top - band.bottom) <= 1, "…16:9 screen: the field is centred, the same band above and below", `top ${band.top.toFixed(1)}, bottom ${band.bottom.toFixed(1)}`);
+  ok(/gradient/.test(band.sea) && band.swell !== "none", "…the bands show the page's sea backdrop (gradient and swell), not a flat black", band.sea.slice(0, 40));
+  ok(band.fs[0] >= 0 && band.fs[1] >= 0 && band.fs[2] <= band.vw && band.fs[3] <= band.vh, "…the fullscreen button stays on screen", JSON.stringify(band.fs));
   await page.click("#fsBtn");
   await page.waitForFunction(() => !document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
   ok(await page.evaluate(() => !document.fullscreenElement), "second click leaves fullscreen");
   await page.keyboard.press("f");
   await page.waitForFunction(() => !!document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
   ok(await page.evaluate(() => !!document.fullscreenElement), "F enters fullscreen while playing");
+  ok(await page.evaluate(() => { const h = document.getElementById("fsHint"); return !h || !h.classList.contains("on"); }), "…and the \"F helskärm\" chip is gone");
   await page.keyboard.press("F");
   await page.waitForFunction(() => !document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
   ok(await page.evaluate(() => !document.fullscreenElement), "F again leaves it");
@@ -233,7 +260,7 @@ if (want("water")) {
     await page.waitForFunction(() => document.documentElement.classList.contains("is-fs"), null, { timeout: 3000 }).catch(() => {});
     await sleep(300);
     let m = await boxes(page);
-    ok(m.info.mode === "gl" && same(m.g, m.w) && m.w.rad === "0px" && m.w.shadow === "none", "fullscreen: water canvas and game canvas overlap exactly, square corners, no shadow", `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
+    ok(m.info.mode === "gl" && same(m.g, m.w) && m.g.shadow === "none" && m.w.shadow !== "none", "fullscreen: water canvas and game canvas overlap exactly (same rounded corners), the shadow drawn once", `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
     await page.keyboard.press("f"); await sleep(300);
     m = await boxes(page);
     ok(same(m.g, m.w), "after leaving fullscreen: still the same box", `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
@@ -310,6 +337,7 @@ if (want("hud")) {
       const h = window.__held, all = [...h.sw, ...h.mo];
       all.forEach((o, i) => { o.x = h.xy[i][0]; o.y = h.xy[i][1]; o.vx = o.vy = 0; if (o.life != null) o.life = 6; });
       S.swimmers.length = 0; S.swimmers.push(...h.sw); S.monsters.length = 0; S.monsters.push(...h.mo);
+      S.spawnTimer = 1e9; // no new swimmer either: one spawned under a piece shows for a frame before this runs (a flaky fade)
       requestAnimationFrame(hold);
     };
     hold();
@@ -317,7 +345,7 @@ if (want("hud")) {
   const hudNow = () => page.evaluate(() => window.livboj.debug().hud);
   // the glass's own pixels: alpha of the 2D canvas at a point of a piece with no text or sprite (GPU water: transparent elsewhere)
   const glassAlpha = (id, fx, fy) => page.evaluate(([id, fx, fy]) => {
-    const c = document.getElementById("game"), q = window.livboj.debug().hud[id], k = c.width / 900;
+    const c = document.getElementById("game"), q = window.livboj.debug().hud[id], k = c.width / 1200;
     return c.getContext("2d").getImageData(Math.round((q.x + q.w * fx) * k), Math.round((q.y + q.h * fy) * k), 1, 1).data[3];
   }, [id, fx, fy]);
   await sleep(900);
@@ -354,6 +382,85 @@ if (want("hud")) {
   ok(tap, "the Spurt button keeps its thumb size (hit area unchanged)");
   ok(!errors.length, "no console/page errors", errors.join(" | "));
   await context.close();
+  server.overrides.delete("/game.js");
+}
+
+// ---------------------------------------------------------------- every button by a real click / tap
+// The canvas buttons are laid out by hud.js per canvas size (debug() reports them in logical 1200x600
+// coords); a real mouse click (desktop) and a real tap (phone) at each must do what it says: mute,
+// Spurt (at its right edge, by the canvas's right edge), "Avsluta spelet" (arm, then confirm, also on
+// the level board where it sits in the bottom row), the level board's and the end screen's buttons,
+// "Till startsidan", and the DOM fullscreen button.
+if (want("buttons")) {
+  console.log("buttons");
+  const fs = await import("node:fs"), path = await import("node:path");
+  const { ROOT } = await import("./harness.mjs");
+  const gsrc = fs.readFileSync(path.join(ROOT, "game.js"), "utf8"), hook = 'S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;';
+  server.overrides.set("/game.js", gsrc.replace(hook, hook + " window.__S = S;"));
+  for (const s of [{ w: 1366, h: 768 }, { w: 844, h: 390, dsf: 3, touch: true }]) {
+    const tag = `${s.w}x${s.h}${s.touch ? " touch" : ""}`;
+    const { context, page, errors } = await newPage(s);
+    await openMenu(page); await startSolo(page); await waitPlay(page);
+    // logical canvas point -> client point
+    const at = (x, y) => page.evaluate(([x, y]) => { const r = document.getElementById("game").getBoundingClientRect(); return { x: r.left + x * r.width / 1200, y: r.top + y * r.height / 600 }; }, [x, y]);
+    const press = async (x, y) => { const p = await at(x, y); if (s.touch) await page.touchscreen.tap(p.x, p.y); else await page.mouse.click(p.x, p.y); await sleep(250); return p; };
+    const dbg = () => page.evaluate(() => window.livboj.debug());
+    const muted = () => page.evaluate(() => localStorage.getItem("livboj-muted"));
+    const centre = (b) => [b.x + b.w / 2, b.y + b.h / 2];
+    if (s.touch) await press(600, 200); // a first touch: the Spurt button shows for touch play
+    let d = await dbg();
+    const m0 = await muted();
+    await press(d.muteBtn.x, d.muteBtn.y);
+    const m1 = await muted();
+    await press(d.muteBtn.x, d.muteBtn.y);
+    ok(m1 === "1" && (await muted()) === "0" && m0 !== "1", `${tag}: mute (bottom left) toggles the sound, twice back`, `${m0} -> ${m1} -> ${await muted()}`);
+    if (s.touch) {
+      d = await dbg();
+      await page.evaluate(() => { for (const p of window.__S.players.values()) p.dashCooldown = 0; });
+      const p = await press(d.dashBtn.x + d.dashBtn.r * 0.92, d.dashBtn.y);
+      const r = await page.evaluate(() => { const c = document.getElementById("game").getBoundingClientRect(); return { right: c.right, cd: [...window.__S.players.values()][0].dashCooldown }; });
+      ok(r.cd > 0, `${tag}: a tap at the right edge of Spurt dashes`, `tap at x ${p.x.toFixed(0)} (canvas right edge ${r.right.toFixed(0)}, viewport ${s.w}); cooldown ${r.cd.toFixed(2)}`);
+    }
+    // Avsluta spelet: the first press arms it, the second ends the game
+    d = await dbg();
+    await press(...centre(d.quitBtn));
+    const armed = await dbg();
+    await press(...centre(d.quitBtn));
+    ok(armed.phase === "play" && (await dbg()).phase === "over", `${tag}: "Avsluta spelet" (top right) arms on the first press, ends on the second`, `${armed.phase} -> ${(await dbg()).phase}`);
+    await sleep(400);
+    // the end screen: "Spela igen" starts over
+    d = await dbg();
+    ok(!!d.actionBtn && !!d.leaveBtn, `${tag}: end screen shows "Spela igen" and "Till startsidan"`, JSON.stringify([d.actionBtn, d.leaveBtn]));
+    if (d.actionBtn) await press(...centre(d.actionBtn));
+    ok(["intro", "play"].includes((await dbg()).phase) && (await dbg()).level === 0, `${tag}: "Spela igen" starts a new game`);
+    // the level board: its button, and "Avsluta spelet" in the bottom row
+    await page.evaluate(() => { const S = window.__S; S.caught = 8; S.phase = "cleared"; });
+    await sleep(600);
+    d = await dbg();
+    if (d.actionBtn) await press(...centre(d.actionBtn));
+    d = await dbg();
+    ok(d.phase === "intro" && d.level === 1, `${tag}: the level board's "Starta nästa nivå" goes on to level 2`, `${d.phase} level ${d.level + 1}`);
+    await page.evaluate(() => { const S = window.__S; S.caught = 10; S.phase = "cleared"; });
+    await sleep(600);
+    d = await dbg();
+    await press(...centre(d.quitBtn)); await press(...centre(d.quitBtn));
+    ok((await dbg()).phase === "over" && d.quitBtn.y > 500, `${tag}: on the level board "Avsluta spelet" sits in the bottom row and works`, `quit at y ${d.quitBtn.y.toFixed(0)}`);
+    await sleep(400);
+    // Till startsidan
+    d = await dbg();
+    const nav = page.waitForNavigation({ waitUntil: "load", timeout: 8000 }).then(() => true, () => false);
+    if (d.leaveBtn) await press(...centre(d.leaveBtn));
+    ok(await nav && await page.evaluate(() => !!document.getElementById("solo") && !document.getElementById("menu").hidden), `${tag}: "Till startsidan" goes back to the menu`);
+    // the fullscreen button
+    await startSolo(page); await waitPlay(page);
+    const fb = await page.evaluate(() => { const b = document.getElementById("fsBtn").getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; });
+    if (s.touch) await page.touchscreen.tap(fb.x, fb.y); else await page.mouse.click(fb.x, fb.y);
+    await page.waitForFunction(() => !!document.fullscreenElement, null, { timeout: 3000 }).catch(() => {});
+    const fsOn = await page.evaluate(() => !!document.fullscreenElement);
+    ok(fsOn, `${tag}: a ${s.touch ? "tap" : "click"} on the fullscreen button (beside mute) enters fullscreen`);
+    ok(!errors.length, `${tag}: no console/page errors`, errors.join(" | "));
+    await context.close();
+  }
   server.overrides.delete("/game.js");
 }
 

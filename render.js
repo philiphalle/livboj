@@ -7,7 +7,7 @@
 //
 // Sibling modules are imported with this module's own ?v=<build> (see boot.js):
 // a plain `import … from "./sim.js"` would load a second, uncached copy.
-const { SHORE_H, EAT_DWELL, shoreY, Phase, BASE_LEVELS, SKINS, HAIRS } = await import(`./sim.js${new URL(import.meta.url).search}`);
+const { shoreH, EAT_DWELL, shoreY, Phase, BASE_LEVELS, SKINS, HAIRS } = await import(`./sim.js${new URL(import.meta.url).search}`);
 // the water (GPU layer under the canvas, or its 2D fallback): water.js
 const { createWater, drawWater2D } = await import(`./water.js${new URL(import.meta.url).search}`);
 const { createHud, uiFont } = await import(`./hud.js${new URL(import.meta.url).search}`);
@@ -48,10 +48,10 @@ export function createRenderer(canvas, ui) {
   function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
   function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
   function drawShore(w, h) {
-    const y0 = shoreY({ w, h });
+    const y0 = shoreY({ w, h }), SH = shoreH({ w, h });
     const g = ctx.createLinearGradient(0, y0, 0, h);
     g.addColorStop(0, "#cdb583"); g.addColorStop(0.16, "#e7d4a4"); g.addColorStop(1, "#d6bd85");
-    ctx.fillStyle = g; ctx.fillRect(0, y0, w, SHORE_H);
+    ctx.fillStyle = g; ctx.fillRect(0, y0, w, SH);
     // wet sand with a faint sky reflection
     const wet = ctx.createLinearGradient(0, y0, 0, y0 + 18);
     wet.addColorStop(0, "rgba(120,150,170,0.38)"); wet.addColorStop(1, "rgba(150,120,70,0)");
@@ -72,7 +72,7 @@ export function createRenderer(canvas, ui) {
     ctx.globalAlpha = 1;
     // sand speckles
     ctx.fillStyle = "rgba(120,95,55,0.22)";
-    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 12 + ((i * 53) % (SHORE_H - 14)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
+    for (let i = 0; i < 46; i++) { const sx = (i * 97) % w, sy = y0 + 12 + ((i * 53) % (SH - 14)); ctx.beginPath(); ctx.arc(sx, sy, 1, 0, Math.PI * 2); ctx.fill(); }
   }
   function drawSaved(sv) {
     const skin = SKINS[sv.sk % SKINS.length], hair = HAIRS[sv.hr % HAIRS.length], suit = SUITS[sv.sid % SUITS.length];
@@ -100,24 +100,25 @@ export function createRenderer(canvas, ui) {
   }
   // ---- Beach ---------------------------------------------------------------
   // Everything below the wet-sand band (drawShore owns the foam line and wet sand).
-  // Props are spread along the beach at fixed fractions of the world width;
+  // Props are spread along the beach at fixed fractions of the world width, at depths
+  // drawn up for a 70-deep beach and scaled to this one (60 on the 2:1 worlds);
   // the corners stay low: the HUD's buttons sit there.
   function drawScenery(w, h) {
-    const gy = shoreY({ w, h });
-    drawSand(w, gy);
-    drawFootprints(w * 0.38, gy + 58, w * 0.58, gy + 30);
-    drawTowel(w * 0.31, gy + 46, 54, 24, -0.08, ["#3aa0ff", "#f4f4f0"]);
-    drawTowel(w * 0.69, gy + 48, 52, 23, 0.1, ["#ffb020", "#e5484d"]);
-    drawShell(w * 0.36, gy + 26, 0.4, "#f6d7c3"); drawShell(w * 0.55, gy + 60, -0.3, "#f3e6cf"); drawShell(w * 0.74, gy + 25, 0.9, "#f6c9c0"); drawShell(w * 0.11, gy + 30, -0.6, "#f3e6cf");
-    drawTower(w * 0.2, gy);
-    drawUmbrella(w * 0.8, gy);
-    drawBucket(w * 0.88, gy + 50);
-    drawStarfish(w * 0.62, gy + 52);
-    drawBeachBall(w * 0.495, gy + 47);
+    const gy = shoreY({ w, h }), SH = shoreH({ w, h }), d = (y) => gy + y * SH / 70;
+    drawSand(w, gy, SH);
+    drawFootprints(w * 0.405, d(58), w * 0.58, d(30));
+    drawTowel(w * 0.345, d(46), 54, 24, -0.08, ["#3aa0ff", "#f4f4f0"]);
+    drawTowel(w * 0.69, d(48), 52, 23, 0.1, ["#ffb020", "#e5484d"]);
+    drawShell(w * 0.385, d(24), 0.4, "#f6d7c3"); drawShell(w * 0.55, d(60), -0.3, "#f3e6cf"); drawShell(w * 0.74, d(25), 0.9, "#f6c9c0"); drawShell(w * 0.11, d(30), -0.6, "#f3e6cf");
+    drawTower(w * 0.27, d(58)); // (right of the fullscreen button and its "F helskärm" chip)
+    drawUmbrella(w * 0.8, d(58));
+    drawBucket(w * 0.88, d(50));
+    drawStarfish(w * 0.62, d(52));
+    drawBeachBall(w * 0.495, d(47));
   }
   // sand grain and wind ripples, deterministic so nothing crawls
-  function drawSand(w, gy) {
-    const top = gy + 20, hh = SHORE_H - 22;
+  function drawSand(w, gy, SH) {
+    const top = gy + 20 * SH / 70, hh = SH - 22 * SH / 70;
     ctx.save(); ctx.lineCap = "round";
     ctx.strokeStyle = "rgba(255,246,220,0.35)"; ctx.lineWidth = 1.2;
     const rows = lowFx ? 2 : 4;
@@ -173,8 +174,8 @@ export function createRenderer(canvas, ui) {
     ctx.fillStyle = col; ctx.fillRect(-1.6, 2.2, 3.2, 1.8);
     ctx.restore();
   }
-  function drawTower(bx, gy) {
-    const cabW = 50, cabH = 34, legH = 32, baseY = gy + 58, cy = baseY - legH - cabH, side = 9;
+  function drawTower(bx, baseY) {
+    const cabW = 50, cabH = 34, legH = 32, cy = baseY - legH - cabH, side = 9;
     const OUT = "rgba(45,26,10,0.5)";
     // shadow on the sand, cast down-right
     ctx.fillStyle = "rgba(90,60,25,0.22)"; ctx.beginPath();
@@ -227,8 +228,8 @@ export function createRenderer(canvas, ui) {
     ctx.fillStyle = "#ffb020"; ctx.beginPath(); ctx.moveTo(px, ptop + 1); ctx.quadraticCurveTo(px + 9, ptop - 1 + f1, px + 19, ptop + 2 + f2); ctx.lineTo(px + 19, ptop + 11 + f2); ctx.quadraticCurveTo(px + 9, ptop + 9 + f1, px, ptop + 12); ctx.closePath(); ctx.fill();
     ctx.fillStyle = "#e5484d"; ctx.beginPath(); ctx.moveTo(px, ptop + 6.5); ctx.quadraticCurveTo(px + 9, ptop + 4 + f1, px + 19, ptop + 6.5 + f2); ctx.lineTo(px + 19, ptop + 11 + f2); ctx.quadraticCurveTo(px + 9, ptop + 9 + f1, px, ptop + 12); ctx.closePath(); ctx.fill();
   }
-  function drawUmbrella(bx, gy) {
-    const baseY = gy + 58, sway = Math.sin(waveT * 1.3) * 0.025, R = 36;
+  function drawUmbrella(bx, baseY) {
+    const sway = Math.sin(waveT * 1.3) * 0.025, R = 36;
     // shadow of the canopy on the sand (cast down-right) and a towel beneath
     ctx.fillStyle = "rgba(90,60,25,0.20)"; ctx.beginPath(); ctx.ellipse(bx + 16, baseY - 4, R * 0.95, 9, 0, 0, Math.PI * 2); ctx.fill();
     drawTowel(bx + 4, baseY - 8, 46, 20, -0.05, ["#22c55e", "#f4f4f0"]);
@@ -1007,11 +1008,12 @@ export function createRenderer(canvas, ui) {
   // HiDPI backing store: draw in logical CW×CH coords but back the canvas with
   // (displayed size × devicePixelRatio) pixels so text and edges stay crisp.
   // Capped so a big retina screen doesn't melt: pixel ratio at most 2 on
-  // desktop and 1.5 on phones/tablets, and at most MAX_BACK_W pixels wide.
+  // desktop and 1.5 on phones/tablets, and at most MAX_BACK_W pixels wide (2960x1480:
+  // the pixel budget the 2560 px cap gave the old 3:2 canvas, 2560x1707).
   // Checked every frame (cheap), so it follows resizes, fullscreen, a window
   // moved to another screen and the cap itself changing.
   let backK = 1;
-  const MAX_BACK_W = 2560, coarseMQ = matchMedia("(pointer: coarse)");
+  const MAX_BACK_W = 2960, coarseMQ = matchMedia("(pointer: coarse)");
   function fitBacking() {
     const cw = canvas.clientWidth;
     if (!cw) return;
@@ -1050,12 +1052,14 @@ export function createRenderer(canvas, ui) {
     if (inGame) lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
     // the GPU water layer under this canvas (false: no GPU water this frame -> 2D water)
     const screen = inGame && (v.phase === Phase.CLEARED || v.phase === Phase.OVER || v.phase === Phase.WIN); // (blurred behind a card: hud.js)
-    glWater = inGame && water.draw({ v, f, t: waveT, lowFx, saved, selfId, selfDash: selfPos.dashActive > 0, SHORE_H, playing: v.phase === Phase.PLAY, screen });
+    glWater = inGame && water.draw({ v, f, t: waveT, lowFx, saved, selfId, selfDash: selfPos.dashActive > 0, SHORE_H: shoreH(v.world), playing: v.phase === Phase.PLAY, screen });
     if (glWater) ctx.clearRect(0, 0, CW, CH); else { ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH); }
     if (!v) { hud.wait("Ansluter…"); return; }
     if (v.phase === Phase.LOBBY) { hud.lobby(v); return; }
     ctx.setTransform(backK * f.s, 0, 0, backK * f.s, backK * f.ox, backK * f.oy);
     if (!glWater) drawWater2D(ctx, v.world.w, v.world.h, shoreY(v.world), waveT, lowFx, backK * f.s);
+    // a world of another shape (a 3:2 one from a host on the previous build) is letterboxed: keep the gulls and the rest inside it
+    ctx.save(); ctx.beginPath(); ctx.rect(0, 0, v.world.w, v.world.h); ctx.clip();
     for (const z of v.swamps || []) drawSwamp(z);
     if (!glWater) for (const z of v.whirls || []) drawWhirl(z);
     drawShore(v.world.w, v.world.h);
@@ -1069,6 +1073,7 @@ export function createRenderer(canvas, ui) {
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     drawSeagulls(v.world.w, v.world.h, shoreY(v.world), waveT);
     drawLightGrade(v.world.w, v.world.h);
+    ctx.restore();
     resetBase();
     hud.game(v, occluders(v, f)); // HUD, buttons, screens (hud.js)
     water.frameDone(); // (the quality ladder weighs the frame time against this CPU time)

@@ -22,7 +22,7 @@ const out = path.resolve(args.out || path.join(ROOT, "shots"));
 fs.mkdirSync(out, { recursive: true });
 
 export const SIZES = [
-  { name: "1920x1080", w: 1920, h: 1080 }, { name: "2560x1440", w: 2560, h: 1440 }, { name: "1366x768", w: 1366, h: 768 },
+  { name: "1920x1080", w: 1920, h: 1080 }, { name: "1920x950", w: 1920, h: 950 }, { name: "2560x1440", w: 2560, h: 1440 }, { name: "1366x768", w: 1366, h: 768 },
   { name: "844x390-phone", w: 844, h: 390, touch: true }, { name: "390x844-phone", w: 390, h: 844, touch: true },
 ];
 

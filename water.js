@@ -422,8 +422,10 @@ export function createWater(canvas2d, CW, CH) {
     if (!cssW) return false;
     // soft content: its own (lower) resolution cap
     // (behind a level / end screen the water is only seen blurred — hud.js reads this layer back — so half the pixels do)
-    const k = Math.min(window.devicePixelRatio || 1, 1.25) * [1, 0.75, 0.6][level] * (sc.screen ? 0.5 : 1); // (width capped below: 1400 on touch devices, 1920 elsewhere)
-    const gw = Math.max(64, Math.round(Math.min(cssW * k, coarse.matches ? 1400 : 1920))), gh = Math.round(gw * CH / CW);
+    // (and a pixel budget: 1400x933 on touch devices, 1920x1280 elsewhere, what the old 3:2 canvas got from its width caps)
+    const k = Math.min(window.devicePixelRatio || 1, 1.25) * [1, 0.75, 0.6][level] * (sc.screen ? 0.5 : 1);
+    const maxW = Math.sqrt((coarse.matches ? 1400 * 933 : 1920 * 1280) * CW / CH);
+    const gw = Math.max(64, Math.round(Math.min(cssW * k, maxW))), gh = Math.round(gw * CH / CW);
     if (glc.width !== gw || glc.height !== gh) { glc.width = gw; glc.height = gh; graceUntil = now + 1000; }
     if (size[0] !== gw || size[1] !== gh) size = [gw, gh];
     gl.viewport(0, 0, gw, gh);

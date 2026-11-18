@@ -3,7 +3,7 @@
 // (intro, level cleared, game over, win, lobby, waiting) and the vector icons
 // they use. No emoji on the canvas: those look different on every device.
 //
-// render.js calls it after the world is drawn, in logical CW×CH (900×600)
+// render.js calls it after the world is drawn, in logical CW×CH (1200×600)
 // canvas coords. `u` (1 … 1.4) scales the HUD and the buttons up when the
 // canvas is small on screen (a phone), so text stays legible and the buttons
 // stay thumb-sized; at desktop sizes u is 1 and the HUD scales with the canvas.

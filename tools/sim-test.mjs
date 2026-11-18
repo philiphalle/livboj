@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import assert from "node:assert/strict";
 import {
-  createSim, Phase, BASE_LEVELS, EAT_DWELL, SHORE_H, MAX_PLAYERS, WHIRL_CORE, WHIRL_PLAYER, SWAMP_SLOW,
+  createSim, Phase, BASE_LEVELS, EAT_DWELL, SHORE_H, LEGACY_SHORE_H, shoreH, MAX_PLAYERS, WHIRL_CORE, WHIRL_PLAYER, SWAMP_SLOW,
   worldSize, levelParams, makeObstacles, makeSwamps, makeWhirls, monstersForLevel, circleHitsRect, shoreY,
 } from "../sim.js";
 
@@ -56,12 +56,26 @@ test("no imports and no DOM / audio / network / storage / clock access; Math.ran
 });
 
 console.log("levels and world");
-test("world size grows with the player count, capped at 1560x1040", () => {
-  assert.deepEqual(worldSize(1), { w: 900, h: 600 });
-  assert.deepEqual(worldSize(2), { w: 1070, h: 720 });
-  assert.deepEqual(worldSize(4), { w: 1410, h: 960 });
-  assert.deepEqual(worldSize(5), { w: 1560, h: 1040 });
-  assert.deepEqual(worldSize(MAX_PLAYERS), { w: 1560, h: 1040 });
+test("world size: 2:1, grows with the player count in the old 3:2 worlds' area steps, capped at 1800x900", () => {
+  assert.deepEqual(worldSize(1), { w: 1040, h: 520 });
+  assert.deepEqual(worldSize(2), { w: 1240, h: 620 });
+  assert.deepEqual(worldSize(3), { w: 1444, h: 722 });
+  assert.deepEqual(worldSize(4), { w: 1644, h: 822 });
+  assert.deepEqual(worldSize(5), { w: 1800, h: 900 });
+  assert.deepEqual(worldSize(MAX_PLAYERS), { w: 1800, h: 900 });
+  const oldW = (n) => Math.min(900 + (n - 1) * 170, 1560), oldH = (n) => Math.min(600 + (n - 1) * 120, 1040); // the 3:2 worlds before
+  for (let n = 1; n <= MAX_PLAYERS; n++) {
+    const W = worldSize(n);
+    assert.ok(W.w === 2 * W.h && W.h % 2 === 0, `n=${n}: ${W.w}x${W.h} is 2:1, even`);
+    assert.ok(Math.abs(W.w * W.h / (oldW(n) * oldH(n)) - 1) < 0.01, `n=${n}: area within 1 % of the old world's`);
+    const water = W.w * shoreY(W), oldWater = oldW(n) * (oldH(n) - 70);
+    assert.ok(Math.abs(water / oldWater - 1) < 0.015, `n=${n}: water area within 1.5 % of the old (${water} vs ${oldWater})`);
+  }
+});
+test("the beach: 60 deep on the 2:1 worlds (the share of the height the old 70 took), 70 on a 3:2 world from a host on the old build", () => {
+  assert.equal(SHORE_H, 60); assert.equal(LEGACY_SHORE_H, 70);
+  for (const n of [1, 2, 6, 12]) { const W = worldSize(n); assert.equal(shoreH(W), 60); assert.ok(SHORE_H / W.h <= 70 / Math.min(600 + (n - 1) * 120, 1040) + 1e-9, `n=${n}: no bigger share of the height`); }
+  for (const W of [{ w: 900, h: 600 }, { w: 1070, h: 720 }, { w: 1560, h: 1040 }]) { assert.equal(shoreH(W), 70); assert.equal(shoreY(W), W.h - 70); }
 });
 test("every level is played in the world for the current player count; docks, swamps and whirlpools scale with it", () => {
   for (const n of [1, 2, 3, 6, 12]) for (let i = 0; i < BASE_LEVELS.length; i++) {
@@ -72,20 +86,82 @@ test("every level is played in the world for the current player count; docks, sw
     assert.deepEqual(S.whirls, makeWhirls(i, S.world.w, S.world.h));
   }
   const { S } = mk({ n: 2, level: 7 });
-  assert.equal(S.obstacles[0].x, 60 * 1070 / 900);
+  assert.equal(S.obstacles[0].x, 69 * 1240 / 1040); // x by the width, y by the water height (from 460 on the 1040x520 world)
+  assert.equal(S.obstacles[0].y, 85 * (620 - SHORE_H) / 460);
 });
 test("8 levels; docks from level 2, swamps from level 4, whirlpools on levels 6 and 7 only", () => {
   assert.equal(BASE_LEVELS.length, 8);
-  assert.deepEqual(BASE_LEVELS.map((_, i) => makeObstacles(i, 900, 600).length), [0, 1, 2, 3, 4, 4, 5, 6]);
-  assert.deepEqual(BASE_LEVELS.map((_, i) => makeSwamps(i, 900, 600).length), [0, 0, 0, 1, 1, 2, 2, 3]);
-  assert.deepEqual(BASE_LEVELS.map((_, i) => makeWhirls(i, 900, 600).length), [0, 0, 0, 0, 0, 1, 1, 0]);
+  assert.deepEqual(BASE_LEVELS.map((_, i) => makeObstacles(i, 1040, 520).length), [0, 1, 2, 3, 4, 4, 5, 6]);
+  assert.deepEqual(BASE_LEVELS.map((_, i) => makeSwamps(i, 1040, 520).length), [0, 0, 0, 1, 1, 2, 2, 3]);
+  assert.deepEqual(BASE_LEVELS.map((_, i) => makeWhirls(i, 1040, 520).length), [0, 0, 0, 0, 0, 1, 1, 0]);
+});
+
+// ---- the layouts, for every level and player count
+const COUNTS = [1, 2, 3, 4, 5, 6, 12], RING = 30, PASS = 64; // a ring is 60 across: a gap is closed (0) or at least 64
+const rectGap = (a, b) => Math.hypot(Math.max(0, a.x - (b.x + b.w), b.x - (a.x + a.w)), Math.max(0, a.y - (b.y + b.h), b.y - (a.y + a.h)));
+const eachLayout = (fn) => { for (const n of COUNTS) for (let i = 0; i < BASE_LEVELS.length; i++) { const W = worldSize(n); fn({ n, i, W, tag: `n=${n} level ${i + 1}`, ob: makeObstacles(i, W.w, W.h), sw: makeSwamps(i, W.w, W.h), wh: makeWhirls(i, W.w, W.h) }); } };
+test("every dock lies in the water (inside the world, never on the beach); a pier from the beach ends at the waterline", () => {
+  eachLayout(({ W, tag, ob }) => ob.forEach((o, k) => {
+    assert.ok(o.x >= -1e-9 && o.y >= -1e-9 && o.x + o.w <= W.w + 1e-9 && o.y + o.h <= shoreY(W) + 1e-6, `${tag}: dock ${k} ${JSON.stringify(o)}`);
+  }));
+});
+test("gaps a ring can pass: dock to dock, to the edges and to the beach either closed or >= 64 (a ring is 60 across)", () => {
+  eachLayout(({ W, tag, ob }) => ob.forEach((o, k) => {
+    for (const [g, what] of [[o.x, "left edge"], [W.w - o.x - o.w, "right edge"], [o.y, "top edge"], [shoreY(W) - o.y - o.h, "beach"]]) assert.ok(g < 1e-6 || g >= PASS, `${tag}: dock ${k} to the ${what}: ${g.toFixed(1)}`);
+    ob.forEach((p, j) => { if (j > k) { const g = rectGap(o, p); assert.ok(g < 1e-6 || g >= PASS, `${tag}: docks ${k} and ${j}: gap ${g.toFixed(1)}`); } });
+  }));
+});
+test("no trapped water: every spot a swimmer can spawn on is in reach of a ring from the start (flood fill, 6 px grid)", () => {
+  eachLayout(({ W, tag, ob }) => {
+    if (!ob.length) return;
+    const G = 6, nx = Math.floor(W.w / G), ny = Math.floor(shoreY(W) / G), free = new Uint8Array(nx * ny), seen = new Uint8Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const x = i * G + G / 2, y = j * G + G / 2; free[j * nx + i] = x >= RING && x <= W.w - RING && y >= RING && y <= shoreY(W) - RING && !ob.some((o) => circleHitsRect(x, y, RING, o)) ? 1 : 0; }
+    const s0 = Math.floor(W.h / 2 / G) * nx + Math.floor(W.w / 2 / G);
+    let start = s0; if (!free[start]) start = free.findIndex((v, k) => v && Math.hypot((k % nx) - (s0 % nx), Math.floor(k / nx) - Math.floor(s0 / nx)) < 30);
+    assert.ok(start >= 0, `${tag}: no free water by the start`);
+    const q = [start]; seen[start] = 1;
+    while (q.length) { const k = q.pop(), i = k % nx, j = (k - i) / nx; for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const a = i + di, b = j + dj, kk = b * nx + a; if (a >= 0 && b >= 0 && a < nx && b < ny && free[kk] && !seen[kk]) { seen[kk] = 1; q.push(kk); } } }
+    // every spawn point (sim.js spawnSwimmer: 60 px in from the edges, not within 26 px of a dock) has a reachable
+    // ring centre within rescue reach (ring 30 + swimmer 16)
+    for (let y = 60; y <= shoreY(W) - 60; y += 9) for (let x = 60; x <= W.w - 60; x += 9) {
+      if (ob.some((o) => circleHitsRect(x, y, 26, o))) continue;
+      let ok = false;
+      for (let j = Math.max(0, Math.floor((y - 46) / G)); j <= Math.min(ny - 1, Math.floor((y + 46) / G)) && !ok; j++) for (let i = Math.max(0, Math.floor((x - 46) / G)); i <= Math.min(nx - 1, Math.floor((x + 46) / G)); i++) if (seen[j * nx + i] && Math.hypot(i * G + G / 2 - x, j * G + G / 2 - y) < 44) { ok = true; break; }
+      assert.ok(ok, `${tag}: a swimmer spawned at ${x},${y} can't be reached`);
+    }
+  });
+});
+test("players never start on a dock (the ring around the centre), swimmers never spawn on one", () => {
+  eachLayout(({ n, i, tag, ob }) => {
+    const { S } = mk({ n, level: i, seed: 40 + n + i });
+    for (const p of S.players.values()) assert.ok(!ob.some((o) => circleHitsRect(p.x, p.y, p.r, o)), `${tag}: player ${p.id} at ${p.x},${p.y}`);
+    S.monsters = []; for (const p of S.players.values()) p.x = p.y = -5000; // nothing gets rescued
+    for (let k = 0; k < 400; k++) { const seq = S.swimmerSeq; S.update(1 / 20, STILL); const s = S.swimmers[S.swimmers.length - 1]; if (S.swimmerSeq > seq && s) { const r = 26 - Math.hypot(s.vx, s.vy) / 20 - 1e-6; assert.ok(!ob.some((o) => circleHitsRect(s.x, s.y, r, o)), `${tag}: swimmer spawned on a dock at ${s.x},${s.y}`); } S.swimmers.length = 0; } // (26 px clear when spawned, less the one step it swam since)
+  });
+});
+test("whirlpools: inside the water, clear of every dock, no wider than half the water's height", () => {
+  eachLayout(({ W, tag, ob, wh }) => wh.forEach((z) => {
+    assert.ok(z.x - z.r >= 0 && z.x + z.r <= W.w && z.y - z.r >= 0 && z.y + z.r <= shoreY(W), `${tag}: whirlpool ${JSON.stringify(z)} outside the water`);
+    assert.ok(!ob.some((o) => circleHitsRect(z.x, z.y, z.r, o)), `${tag}: a dock in the whirlpool`);
+    assert.ok(2 * z.r <= shoreY(W) * 0.5, `${tag}: whirlpool ${(2 * z.r).toFixed(0)} across in ${shoreY(W)} of water`);
+  }));
+});
+test("swamps inside the water; docks and swamps take about the share of the water they took on the old 3:2 worlds", () => {
+  const old = { dock: [0, 1.6, 4.2, 7.1, 7.8, 9.5, 11.4, 14.6], swamp: [0, 0, 0, 7.7, 9.9, 16.9, 19.0, 23.2] }; // % of the water, 900x600 with the 70 beach
+  eachLayout(({ W, i, tag, ob, sw }) => {
+    const water = W.w * shoreY(W);
+    for (const z of sw) assert.ok(z.x >= 0 && z.y >= 0 && z.x + z.w <= W.w && z.y + z.h <= shoreY(W), `${tag}: swamp outside the water`);
+    const dock = 100 * ob.reduce((a, o) => a + o.w * o.h, 0) / water, swamp = 100 * sw.reduce((a, z) => a + Math.PI * z.w * z.h / 4, 0) / water;
+    assert.ok(Math.abs(dock - old.dock[i]) <= Math.max(1.5, old.dock[i] * 0.25), `${tag}: docks ${dock.toFixed(1)} % of the water (was ${old.dock[i]} %)`);
+    assert.ok(Math.abs(swamp - old.swamp[i]) <= Math.max(1, old.swamp[i] * 0.1), `${tag}: swamps ${swamp.toFixed(1)} % (was ${old.swamp[i]} %)`);
+  });
 });
 test("monsters: none on level 1, one on 2-3, two on 4, three from 5; they start by the edges", () => {
   assert.deepEqual(BASE_LEVELS.map((_, i) => monstersForLevel(i)), [0, 1, 1, 2, 3, 3, 3, 3]);
   for (let i = 0; i < 8; i++) {
     const { S } = mk({ level: i, seed: 7 + i });
     assert.equal(S.monsters.length, monstersForLevel(i));
-    S.monsters.forEach((m, k) => { const edge = k % 4; if (edge === 0) assert.equal(m.y, 70); else if (edge === 1) assert.equal(m.y, S.world.h - 70); else if (edge === 2) assert.equal(m.x, 70); });
+    S.monsters.forEach((m, k) => { const edge = k % 4; if (edge === 0) assert.equal(m.y, 70); else if (edge === 1) assert.equal(m.y, shoreY(S.world) - 30); else if (edge === 2) assert.equal(m.x, 70); });
   }
 });
 test("level parameters scale with players (quota +50% per extra player, more misses allowed, faster spawns)", () => {
@@ -96,8 +172,8 @@ test("level parameters scale with players (quota +50% per extra player, more mis
 });
 test("players start in a ring around the centre (alone: on the centre), and selfPos follows the local player", () => {
   const one = mk({ level: 2 });
-  assert.deepEqual([one.me.x, one.me.y], [450, 300]);
-  assert.deepEqual([one.S.selfPos.x, one.S.selfPos.y], [450, 300]);
+  assert.deepEqual([one.me.x, one.me.y], [520, 260]);
+  assert.deepEqual([one.S.selfPos.x, one.S.selfPos.y], [520, 260]);
   const four = mk({ n: 4, level: 2 });
   for (const p of four.S.players.values()) assert.ok(Math.abs(Math.hypot(p.x - four.S.world.w / 2, p.y - four.S.world.h / 2) - 80) < 1e-9);
 });
@@ -273,7 +349,7 @@ console.log("the local ring");
 test("arrow input moves the ring 300 px/s; a dash is 2.1x for 0.18 s with a 0.9 s cooldown (dash sound for the local ring)", () => {
   const { S, log, me } = mk(); quiet(S);
   S.update(DT, { dx: 1, dy: 0, dash: false });
-  assert.ok(Math.abs(me.x - (450 + 300 * DT)) < 1e-9);
+  assert.ok(Math.abs(me.x - (520 + 300 * DT)) < 1e-9);
   const x0 = me.x;
   S.update(DT, { dx: 1, dy: 0, dash: true });
   assert.ok(Math.abs(me.x - x0 - 300 * 2.1 * DT) < 1e-9); assert.equal(me.dashActive, 0.18); assert.equal(me.dashCooldown, 0.9);
@@ -297,7 +373,7 @@ test("a swamp slows the ring to 55 %", () => {
 });
 test("docks are solid: the ring is pushed out and slides along", () => {
   const { S, me } = mk({ level: 1 }); quiet(S);
-  const o = S.obstacles[0]; // 130,150 230x34
+  const o = S.obstacles[0]; // 150,128 266x34
   me.x = o.x + o.w / 2; me.y = o.y - 40;
   run(S, 1, { dx: 0, dy: 1, dash: false });
   assert.ok(Math.abs(me.y - (o.y - me.r)) < 1e-6 && !circleHitsRect(me.x, me.y, me.r - 1e-6, o), `ring at ${me.y}`);

@@ -11,7 +11,7 @@
 // A new module file also goes into MODULES in boot.js.
 const V = new URL(import.meta.url).search;
 const [sim, net, { createRenderer }] = await Promise.all([import(`./sim.js${V}`), import(`./net.js${V}`), import(`./render.js${V}`)]);
-const { Phase, BASE_LEVELS, SHORE_H, EAT_DWELL, shoreY, levelParams, inSwamp, circleHitsRect, whirlPull, SWAMP_SLOW, WHIRL_PLAYER, createSim } = sim;
+const { Phase, BASE_LEVELS, shoreH, EAT_DWELL, shoreY, levelParams, inSwamp, circleHitsRect, whirlPull, SWAMP_SLOW, WHIRL_PLAYER, createSim } = sim;
 const { RELAY_URL, SIG_PARAM, RTC, APP_ID, SIGNAL, getRelaySockets, pickSignaling, relayJoin, runIceProbe,
   loadBoard, saveBoardLS, withEntryId, sortBoard, postGlobalBoard, queueResult, flushBoardQueue } = net;
 // what boot.js hands the pages (besides createGame and initChrome)
@@ -100,6 +100,7 @@ function keepUnshifted() {
 const FS_ENTER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const FS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const HOMEHINT_KEY = "livboj-homehint-until";
+const FSHINT_KEY = "livboj-fshint"; // sessionStorage: the "F helskärm" chip shows once per session
 
 /**
  * Wire the page chrome. Every element is optional (an older cached page may
@@ -128,6 +129,7 @@ export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
   function onFsChange() {
     const on = !!fsElement();
     root.classList.toggle("is-fs", on);
+    if (on) hideFsHint();
     if (fsBtn) { fsBtn.innerHTML = on ? FS_EXIT : FS_ENTER; fsBtn.setAttribute("aria-label", on ? "Avsluta helskärm" : "Helskärm"); fsBtn.title = on ? "Avsluta helskärm (F)" : "Helskärm (F)"; }
     // phones: hold it sideways while fullscreen (not every browser allows it)
     const o = screen.orientation;
@@ -149,6 +151,23 @@ export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
     if (!playing || !canFs) return;
     e.preventDefault(); toggleFullscreen();
   });
+
+  // ---- "F helskärm": a desktop that could go fullscreen but isn't gets a short-lived chip beside the
+  // button when a game starts (mouse and keyboard: no coarse pointer, can hover). Once per session
+  // (sessionStorage); it takes no clicks and sits on the beach row, never over the water.
+  let fsHint = null, fsHintT = 0;
+  function hideFsHint() { clearTimeout(fsHintT); if (fsHint) fsHint.classList.remove("on"); }
+  function showFsHint() {
+    if (!stage || !fsBtn || !canFs || fsElement() || coarsePointer() || !matchMedia("(hover: hover)").matches) return;
+    try { if (sessionStorage.getItem(FSHINT_KEY)) return; sessionStorage.setItem(FSHINT_KEY, "1"); } catch {}
+    if (!fsHint) {
+      fsHint = document.createElement("div"); fsHint.className = "fshint"; fsHint.id = "fsHint"; fsHint.setAttribute("aria-hidden", "true");
+      fsHint.innerHTML = "<b>F</b><span>helskärm</span>";
+      stage.appendChild(fsHint);
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => fsHint.classList.add("on"))); // (after a style pass: it fades in)
+    clearTimeout(fsHintT); fsHintT = setTimeout(hideFsHint, 5500);
+  }
 
   // ---- "Vrid mobilen": a touch device held upright while a game shows. The
   // game keeps running underneath; a tap closes it for this page.
@@ -183,6 +202,7 @@ export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
       playing = !!on;
       if (fsBtn) fsBtn.hidden = !(playing && canFs);
       if (homeHint && playing) homeHint.hidden = true;
+      if (playing) showFsHint(); else hideFsHint();
       updateRotate();
     },
     toggleFullscreen,
@@ -371,7 +391,7 @@ export function createGame(canvas, opts) {
   function spawnSaved(x, y, sk, hr, id) {
     const W = authoritative ? S.world : (lastView && lastView.world) || S.world;
     const top = shoreY(W);
-    saved.push({ x, y, tx: 40 + Math.random() * (W.w - 80), ty: top + 12 + Math.random() * (SHORE_H - 26), sk: sk || 0, hr: hr || 0, sid: id || ((Math.random() * 999) | 0), state: "swim", ph: Math.random() * 6, cheer: 0 });
+    saved.push({ x, y, tx: 40 + Math.random() * (W.w - 80), ty: top + 12 + Math.random() * (shoreH(W) - 26), sk: sk || 0, hr: hr || 0, sid: id || ((Math.random() * 999) | 0), state: "swim", ph: Math.random() * 6, cheer: 0 });
     if (saved.length > 30) saved.shift();
   }
   function updateSaved(dt) {

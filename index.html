@@ -158,25 +158,23 @@
   html, body { overscroll-behavior: none; }
   #wrap { padding: max(16px, var(--sat)) max(16px, var(--sar)) max(16px, var(--sab)) max(16px, var(--sal)); }
   button, .btn, .tab, a { touch-action: manipulation; }
-  .stage { position: relative; flex: none; width: min(96vw, calc(80vh * 3 / 2)); }
-  .stage canvas { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; touch-action: none;
+  .stage { position: relative; flex: none; width: min(96vw, calc(80vh * 2)); container-type: inline-size; }
+  .stage canvas { display: block; width: 100%; height: auto; aspect-ratio: 2 / 1; touch-action: none;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
-  /* While a game shows: the canvas as big as the window allows, letterboxed at 3:2 */
+  /* While a game shows: the canvas as big as the window allows, letterboxed at 2:1 (centred: #wrap) */
   body.playing #wrap { gap: 0; padding: calc(var(--sat) + 6px) calc(var(--sar) + 6px) calc(var(--sab) + 6px) calc(var(--sal) + 6px); }
   body.playing .brand, body.playing .hint, body.playing .homehint { display: none !important; }
   body.playing .stage {
-    width: min(calc(100vw - var(--gx)), calc((100vh - var(--gy)) * 3 / 2));
-    width: min(calc(100dvw - var(--gx)), calc((100dvh - var(--gy)) * 3 / 2));
+    width: min(calc(100vw - var(--gx)), calc((100vh - var(--gy)) * 2));
+    width: min(calc(100dvw - var(--gx)), calc((100dvh - var(--gy)) * 2));
   }
-  html.is-fs .sea { background: #04141d; }
-  html.is-fs .sea::before, html.is-fs .sea::after { display: none; }
-  html.is-fs .stage canvas { border-radius: 0; box-shadow: none; }
+  /* Fullscreen: the whole page, so the sea backdrop fills the band a 2:1 field leaves on a 16:9 screen */
   /* Fullscreen toggle: a round glass button right of the canvas-drawn mute button, in the HUD's
      button family (hud.js). --u is one HUD unit in css px — hud.js: u = min(1.4, max(1, 0.92 / s)),
-     s = canvas css px per logical px, so u*s = min(1.4 s, max(s, 0.92px)); 0.1111% of the stage width = s.
+     s = canvas css px per logical px, so u*s = min(1.4 s, max(s, 0.92px)); 0.08333% of the stage width = s (1200 wide).
      Mute: r 20u at 12u from the bottom-left corner; this button: 40u wide, 12u gap, same row.
      (Margins in % are taken from the width, even vertical ones.) A ::before widens the touch target. */
-  .fsbtn { --u: min(0.15556%, max(0.11111%, 0.92px)); position: absolute; left: 0; bottom: 0; margin: 0 0 calc(12 * var(--u)) calc(64 * var(--u));
+  .fsbtn { --u: min(0.11667%, max(0.08333%, 0.92px)); position: absolute; left: 0; bottom: 0; margin: 0 0 calc(12 * var(--u)) calc(64 * var(--u));
     width: calc(40 * var(--u)); height: auto; aspect-ratio: 1; display: grid; place-items: center; padding: 0; border-radius: 50%; cursor: pointer; color: #fff;
     background: linear-gradient(180deg, rgba(18, 56, 78, 0.74), rgba(5, 24, 37, 0.82)); border: 1px solid rgba(190, 230, 250, 0.3);
     box-shadow: 0 3px 12px rgba(0, 8, 16, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12); -webkit-tap-highlight-color: transparent;
@@ -188,6 +186,18 @@
   .fsbtn svg { width: 50%; height: 50%; }
   /* a tall window: the canvas is width-limited and small, with room below it — the button goes there */
   @media (max-aspect-ratio: 1/1) { .fsbtn { bottom: auto; top: calc(100% + 10px); margin: 0; width: 44px; } }
+  /* "F helskärm": a short-lived chip beside the fullscreen button when a game starts on a desktop that is not
+     fullscreen (game.js initChrome; once per session). On the beach row, never over the water; it takes no clicks.
+     Sized like the HUD: --uc is --u above in container units (cqw: % of the stage width, font sizes included). */
+  .fshint { --uc: min(0.11667cqw, max(0.08333cqw, 0.92px)); position: absolute; left: 0; bottom: 0; margin: 0 0 calc(18 * var(--uc)) calc(116 * var(--uc));
+    display: flex; align-items: center; gap: calc(7 * var(--uc)); padding: calc(4 * var(--uc)) calc(12 * var(--uc)) calc(4 * var(--uc)) calc(4 * var(--uc));
+    border-radius: 999px; pointer-events: none; white-space: nowrap; color: #f2f9ff; font: 600 calc(14 * var(--uc)) / 1.2 "Livboj", ui-rounded, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(180deg, rgba(18, 56, 78, 0.8), rgba(5, 24, 37, 0.86)); border: 1px solid rgba(190, 230, 250, 0.3);
+    box-shadow: 0 3px 12px rgba(0, 8, 16, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12); opacity: 0; transform: translateX(-6px); transition: opacity 0.35s, transform 0.35s; }
+  .fshint.on { opacity: 1; transform: none; }
+  .fshint b { display: grid; place-items: center; min-width: 1.6em; height: 1.6em; border-radius: 0.45em; font-weight: 700; color: #fff;
+    background: linear-gradient(180deg, #ff7a3d, #e2470f); box-shadow: 0 2px 6px rgba(244, 87, 29, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+  @media (max-aspect-ratio: 1/1) { .fshint { bottom: auto; top: calc(100% + 18px); margin: 0 0 0 54px; font-size: 13px; padding: 4px 11px 4px 5px; } }
   /* "Vrid mobilen" over the game on a phone held upright (the game runs on underneath) — the HUD's glass card */
   .rotatecard { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: grid; justify-items: center; gap: 5px;
     padding: 16px 22px 14px; border-radius: 22px; text-align: center; cursor: pointer; width: max-content; max-width: 86%;
@@ -264,7 +274,7 @@
   </div>
 
   <div id="stage" class="stage" hidden>
-    <canvas id="game" width="900" height="600"></canvas>
+    <canvas id="game" width="1200" height="600"></canvas>
     <button id="fsBtn" class="fsbtn" type="button" aria-label="Helskärm" title="Helskärm (F)" hidden></button>
     <div id="rotateCard" class="rotatecard" role="button" tabindex="0" aria-label="Stäng tipset om att vrida mobilen" hidden>
       <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="15" y="6" width="18" height="36" rx="4" fill="none" stroke="currentColor" stroke-width="3"/><path d="M21 37h6" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
