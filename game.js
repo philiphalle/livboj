@@ -1872,6 +1872,16 @@ export function createGame(canvas, opts) {
     if (k === "m" || k === "M") toggleMute();
   }, { passive: false });
   addEventListener("keyup", (e) => { const k = e.key === " " ? "Space" : e.key; keys[k] = false; });
+  // A key or finger released while the window had no focus never reports its
+  // keyup/touchend: let go of everything when focus or visibility goes.
+  function releaseInput() { for (const k in keys) keys[k] = false; pointerTarget = null; dashTap = false; }
+  addEventListener("blur", releaseInput);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { releaseInput(); return; }
+    // back from the background: the host's state stopped arriving only because
+    // this page was frozen, so give it a moment before calling an election
+    if (!authoritative && lastView) lastStateTime = Math.max(lastStateTime, performance.now());
+  });
 
   function toCanvas(clientX, clientY) { const r = canvas.getBoundingClientRect(); return { x: (clientX - r.left) * (CW / r.width), y: (clientY - r.top) * (CH / r.height) }; }
   function inDash(cx, cy) { return Math.hypot(cx - DASH_BTN.x, cy - DASH_BTN.y) <= DASH_BTN.r; }
@@ -1901,7 +1911,9 @@ export function createGame(canvas, opts) {
     }
   }, { passive: false });
   canvas.addEventListener("touchmove", (e) => { e.preventDefault(); for (const t of e.changedTouches) { const c = toCanvas(t.clientX, t.clientY); if (!inDash(c.x, c.y) && !inMute(c.x, c.y)) pointerTarget = toWorld(c.x, c.y, curWorld().w, curWorld().h); } }, { passive: false });
-  canvas.addEventListener("touchend", (e) => { e.preventDefault(); if (e.touches.length === 0) pointerTarget = null; }, { passive: false });
+  const touchEnd = (e) => { e.preventDefault(); if (e.touches.length === 0) pointerTarget = null; };
+  canvas.addEventListener("touchend", touchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", touchEnd, { passive: false }); // (a system gesture or an alert took the finger)
 
   // ---- Boot ---------------------------------------------------------------
   if (mode === "solo") { setupSolo(); initGlobalBoard(); }
