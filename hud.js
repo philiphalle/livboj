@@ -505,7 +505,20 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     ctx.save(); ctx.translate(CW / 2, SCY); ctx.scale(k, k); ctx.translate(-CW / 2, -CH / 2);
     try { fn(); } finally { ctx.restore(); SK = 1; SCY = CH / 2; Q = u; }
   }
-  function card(x, y, w, h) { glass(x, y, w, h, 24, { alpha: 0.8, stroke: "rgba(190,230,250,0.22)" }); }
+  function card(x, y, w, h) { glass(x, y, w, h, 24, { alpha: 0.8, stroke: "rgba(190,230,250,0.22)" }); seeRects._card = mapR({ x, y, w, h }); } // (_card, _team: for the tests, canvas coords)
+  /** The team's name (when the host gave one) as a small heading under a screen's title: centred, short hairlines either side, ellipsised to maxW. */
+  const TEAM_H = 30; // the height a screen grows by when it shows the line
+  function teamLine(name, cx, y, maxW) {
+    const f = uiFont(600, 18), full = tw(name, f) > maxW - 2 * (26 + 12), rule = full ? 0 : 26, gap = full ? 0 : 12; // a long name takes the rules' room
+    const s = fitText(name, f, maxW - 2 * (rule + gap)), w = tw(s, f);
+    if (rule) for (const d of [-1, 1]) {
+      const x0 = cx + d * (w / 2 + gap), x1 = x0 + d * rule, g = ctx.createLinearGradient(x0, 0, x1, 0);
+      g.addColorStop(0, "rgba(255,138,76,0.7)"); g.addColorStop(1, "rgba(255,138,76,0)");
+      ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), y - 7, rule, 1.5);
+    }
+    text(s, cx, y, f, C.accentHi, "center");
+    seeRects._team = { text: s, ...mapR({ x: cx - w / 2 - gap - rule, y: y - 18, w: w + 2 * (gap + rule), h: 24 }) };
+  }
   function confetti(n) {
     for (let i = 0; i < n; i++) {
       const x = ((i * 197) % CW) + Math.sin(t * 1.3 + i) * 22;
@@ -543,13 +556,15 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     backdrop(0.62);
     confetti(46);
     const rows = [...(v.players || [])].map((p) => ({ id: p.id, name: p.id === L.selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, rescues: p.rescues || 0, hue: p.hue, you: p.id === L.selfId, gain: (p.score || 0) - ((L.levelStartScore && L.levelStartScore.get(p.id)) || 0) })).sort((a, b) => b.score - a.score);
-    const W = 620, H = rows.length > 3 ? 478 : 450, x0 = CW / 2 - W / 2, y0 = CH / 2 - H / 2;
+    const TH = v.team ? TEAM_H : 0; // the team's name under the title
+    const W = 620, H = (rows.length > 3 ? 478 : 450) + TH, x0 = CW / 2 - W / 2, y0 = CH / 2 - H / 2;
     scaled(W, H, () => {
       card(x0, y0, W, H);
       text(`Nivå ${v.hud.level + 1} avklarad!`, CW / 2, y0 + 50, uiFont(700, 34), C.ink, "center");
-      text(`Lagets poäng ${v.hud.score}`, CW / 2, y0 + 78, uiFont(500, 17), C.soft, "center");
+      if (TH) teamLine(v.team, CW / 2, y0 + 82, W - 80);
+      text(`Lagets poäng ${v.hud.score}`, CW / 2, y0 + 78 + TH, uiFont(500, 17), C.soft, "center");
       // podium: 2nd left, 1st centre, 3rd right
-      const baseY = y0 + 252, slots = [[1, -128, 64, ["#e6ebf2", "#a9b3c1"]], [0, 0, 88, ["#ffe27a", "#e6a417"]], [2, 128, 48, ["#eaa66b", "#b86a32"]]];
+      const baseY = y0 + 252 + TH, slots = [[1, -128, 64, ["#e6ebf2", "#a9b3c1"]], [0, 0, 88, ["#ffe27a", "#e6a417"]], [2, 128, 48, ["#eaa66b", "#b86a32"]]];
       for (const [rank, dx, hgt, [c0, c1]] of slots) {
         const r = rows[rank]; if (!r) continue;
         const x = CW / 2 + dx, bounce = rank === 0 ? Math.abs(Math.sin(t * 3)) * 6 : 0;
@@ -592,8 +607,8 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     const board = (v.board || []).filter((e) => (e.n === 1) === soloGame).slice(0, 3); // solo runs compare with solo runs, teams with teams
     // Entries from before individual crediting worked have a total but all-zero players: show names only.
     const fmt = (e) => { const ps = e.players || []; const noSplit = ps.every((pp) => typeof pp === "string" || !pp.score); return ps.map((pp) => typeof pp === "string" ? pp : (noSplit ? pp.name : `${pp.name} ${pp.score}p`)).join(", "); };
-    const W = 580, RH = 27, BH = 24;
-    const H = 30 + 52 + lines.length * 42 + 30 + 18 + 30 + rows.length * RH + 16 + 30 + Math.max(1, board.length) * BH + 26 + 50 + (L.authoritative ? 30 : 56) + 14;
+    const W = 580, RH = 27, BH = 24, TH = v.team ? TEAM_H + 4 : 0;
+    const H = 30 + 52 + lines.length * 42 + TH + 30 + 18 + 30 + rows.length * RH + 16 + 30 + Math.max(1, board.length) * BH + 26 + 50 + (L.authoritative ? 30 : 56) + 14;
     const x0 = CW / 2 - W / 2, y0 = CH / 2 - H / 2;
     scaled(W, H, () => {
       card(x0, y0, W, H);
@@ -609,6 +624,7 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
         if (win && l === lines[0]) { col = ctx.createLinearGradient(0, y - 32, 0, y + 4); col.addColorStop(0, "#fff3b8"); col.addColorStop(0.55, "#ffd34d"); col.addColorStop(1, "#f0a417"); }
         text(l, CW / 2, y, uiFont(700, lines.length > 1 && l !== lines[0] ? 28 : 36), col, "center"); y += 6;
       }
+      if (TH) { y += TH; teamLine(v.team, CW / 2, y - 2, W - 80); } // the team's name, then its score
       y += 26; text(sub, CW / 2, y, uiFont(600, 19), C.gold, "center");
       y += 18;
       // standings
@@ -690,12 +706,14 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     const lines = []; let cur = [], cw = 0;
     for (const c of chips) { if (cur.length && cw + 8 + c.w > maxRow) { lines.push(cur); cur = []; cw = 0; } cur.push(c); cw += (cur.length > 1 ? 8 : 0) + c.w; }
     if (cur.length) lines.push(cur);
-    const W = 460, H = 222 + lines.length * 40, x0 = CW / 2 - W / 2, y0 = CH / 2 - H / 2 + 6;
+    const TH = v.team ? TEAM_H : 0; // the team's name under the title
+    const W = 460, H = 222 + TH + lines.length * 40, x0 = CW / 2 - W / 2, y0 = CH / 2 - H / 2 + 6;
     scaled(W, H + 20, () => {
       card(x0, y0, W, H);
       drawRing(CW / 2, y0 + 4 + Math.sin(t * 2) * 3, 36, null, true);
       text("Lobby", CW / 2, y0 + 82, uiFont(700, 30), C.ink, "center");
-      let y = y0 + 128;
+      if (TH) teamLine(v.team, CW / 2, y0 + 112, W - 60);
+      let y = y0 + 128 + TH;
       if (L.authoritative) actionButton("Starta spelet", icon.play, CW / 2, y, false);
       else { ctx.globalAlpha = 0.75 + 0.25 * Math.sin(t * 3); text("Väntar på att värden startar…", CW / 2, y, uiFont(500, 17), C.soft, "center", "middle"); ctx.globalAlpha = 1; }
       y += 56;
@@ -721,6 +739,7 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
   function begin() {
     L = live() || {};
     dk = ctx.getTransform ? ctx.getTransform().a : 1; Q = u; SK = 1; hoverAny = false;
+    delete seeRects._team; delete seeRects._card;
   }
   function end() {
     const want = hoverAny ? "pointer" : "";

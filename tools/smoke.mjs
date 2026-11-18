@@ -3,8 +3,9 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,water,hud,buttons,keys,board,cache,menu,forslag,live
+//   node tools/smoke.mjs --only layout,fullscreen,water,hud,buttons,keys,board,cache,menu,forslag,live,team
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
+//   node tools/smoke.mjs --only team --shots /tmp/team              # + screenshots of the team-name screens
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
 // 2:1, inside the viewport, >= 90 % of the limiting side, backing store caps,
@@ -18,7 +19,9 @@
 // cache busting (the build id covers every module, each module loads once under
 // ?v=<build>, a change to sim.js alone is noticed and a reload runs it); and
 // with --live, that a forced reconnect neither drops nor duplicates a player
-// and never starts a host election. The rules themselves: tools/sim-test.mjs.
+// and never starts a host election; also with --live, the team name (host's lobby
+// field -> every joiner's lobby / level / end screens -> the leaderboard result, a
+// promoted host keeps it, mixed old/new builds). The rules themselves: tools/sim-test.mjs.
 //
 // The leaderboard is ALWAYS stubbed (harness.mjs stubBoard): no test posts to the real board.
 import { serve, launch, stubBoard } from "./harness.mjs";
@@ -26,7 +29,8 @@ import { serve, launch, stubBoard } from "./harness.mjs";
 const args = {}; const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith("--")) { const v = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true"; args[a.slice(2)] = v; } }
 const ONLY = args.only ? new Set(args.only.split(",")) : null;
-const want = (k) => (ONLY ? ONLY.has(k) : k !== "live" || args.live === "true");
+const LIVE = new Set(["live", "team"]); // these go through the relay: only with --live (or --only)
+const want = (k) => (ONLY ? ONLY.has(k) : !LIVE.has(k) || args.live === "true");
 const RELAY_Q = args.relay ? `relay=${encodeURIComponent(args.relay)}` : "";
 
 let fails = 0, passes = 0;
@@ -667,6 +671,239 @@ if (want("live")) {
   ok(JSON.stringify(m1.mon.map((m) => m.slice(0, 2))) !== JSON.stringify(m2.mon.map((m) => m.slice(0, 2))) && m2.mon.every((m) => Number.isFinite(m[0]) && Number.isFinite(m[1])), "…and they keep swimming under the new host", JSON.stringify(m2.mon.map((m) => m.slice(0, 2))));
   ok(m2.phase === "play" && !J.errors.length, "…the level goes on, no errors", `phase ${m2.phase} ${J.errors.join(" | ")}`);
   await J.context.close();
+}
+
+// ---------------------------------------------------------------- the team's name (live relay, leaderboard stubbed)
+// The host types an optional name in its DOM lobby; it reaches the joiners in the host's state (`team`,
+// an optional snapshot field), shows under the title of the canvas lobby / level board / end screens
+// (hud.js reports what it drew: debug().hud._team, with the card's box _card, canvas coords), is fixed
+// from the start of a game, goes into the stubbed leaderboard POST, survives a host change, and old and
+// new builds mix without errors (7f25a39 = the build before the field: its game.js, hud.js, host.html).
+if (want("team")) {
+  console.log("team" + (args.relay ? ` (${args.relay})` : " (production relay; leaderboard stubbed)"));
+  const fs = await import("node:fs"), path = await import("node:path"), { execFileSync } = await import("node:child_process");
+  const { ROOT } = await import("./harness.mjs");
+  const SHOTS = args.shots && args.shots !== "true" ? args.shots : null;
+  if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
+  const shot = async (pg, name) => { if (SHOTS) await pg.screenshot({ path: path.join(SHOTS, `${name}.png`) }); };
+  const gsrc = fs.readFileSync(path.join(ROOT, "game.js"), "utf8"), hook = 'S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;';
+  ok(gsrc.includes(hook), "game.js still has the line the test hooks into");
+  const hooked = gsrc.replace(hook, hook + " window.__S = S;");
+  const newRoom = () => Array.from({ length: 5 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[(Math.random() * 31) | 0]).join("");
+  async function hostLobby(H, room, name = "Värden") {
+    await H.page.goto(url("host.html", `room=${room}`), { waitUntil: "load" });
+    await H.page.waitForFunction(() => !!document.getElementById("create"));
+    await H.page.fill("#name", name); await H.page.click("#create");
+    await H.page.waitForFunction(() => !!window.livboj);
+  }
+  async function join(J, room, name) {
+    await J.page.goto(url("index.html", `room=${room}`), { waitUntil: "load" });
+    await J.page.waitForFunction(() => !!document.getElementById("join"));
+    await J.page.fill("#name", name); await J.page.click("#join");
+  }
+  const seen = (pg) => pg.evaluate(() => { const d = window.livboj.debug(); return { team: d.team, drawn: d.hud._team || null, card: d.hud._card || null, phase: d.phase, auth: d.authoritative }; });
+  // the drawn line inside the card, the card inside the canvas
+  const fits = (s) => !!s.drawn && !!s.card && s.drawn.x >= s.card.x - 0.5 && s.drawn.x + s.drawn.w <= s.card.x + s.card.w + 0.5 && s.drawn.y >= s.card.y && s.drawn.y + s.drawn.h <= s.card.y + s.card.h
+    && s.card.x >= 0 && s.card.y >= 0 && s.card.x + s.card.w <= 1200 && s.card.y + s.card.h <= 600;
+  const box = (s) => s.drawn ? `"${s.drawn.text}" at ${s.drawn.x.toFixed(0)},${s.drawn.y.toFixed(0)} ${s.drawn.w.toFixed(0)}x${s.drawn.h.toFixed(0)} in card ${s.card ? `${s.card.x.toFixed(0)},${s.card.y.toFixed(0)} ${s.card.w.toFixed(0)}x${s.card.h.toFixed(0)}` : "-"}` : "no line";
+  // wait until a page shows `want` (or no line at all for ""): -> ms, or -1
+  async function waitTeam(pg, want, ms = 3000) {
+    const t0 = Date.now();
+    try {
+      await pg.waitForFunction((w) => { const d = window.livboj.debug(); return d.team === w && (w ? !!d.hud._team : !d.hud._team); }, want, { timeout: ms, polling: 50 });
+      return Date.now() - t0;
+    } catch { return -1; }
+  }
+  const results = (log) => log.posts.flatMap((b) => (b && Array.isArray(b.entries) ? b.entries : []));
+  const setScoreAndQuit = (pg, score) => pg.evaluate((score) => { const S = window.__S; S.score = score; for (const p of S.players.values()) p.score = Math.round(score / S.players.size); window.livboj.quitGame(); }, score);
+  const phaseIs = (pg, ph, ms = 10000) => pg.waitForFunction((ph) => [].concat(ph).includes(window.livboj.debug().phase), ph, { timeout: ms }).then(() => true, () => false);
+
+  server.overrides.set("/game.js", hooked);
+  const room = newRoom();
+  const H = await newPage({ w: 1366, h: 768 }), J = await newPage({ w: 1366, h: 768 }), P = await newPage({ w: 844, h: 390, dsf: 3, touch: true });
+  await hostLobby(H, room);
+  await join(J, room, "Gästen"); await join(P, room, "Mobilen");
+  let all3 = true;
+  try {
+    await H.page.waitForFunction(() => window.livboj.roster().length === 3, null, { timeout: 20000 });
+    for (const X of [J, P]) await X.page.waitForFunction(() => window.livboj.debug().n === 3 && window.livboj.debug().phase === "lobby", null, { timeout: 20000 });
+  } catch { all3 = false; }
+  ok(all3, `host, a desktop joiner and a phone joiner in one lobby (room ${room})`);
+  await sleep(600);
+  // no name: no line anywhere, the field empty with an example placeholder from the host's name
+  const f0 = await H.page.$eval("#team", (e) => ({ v: e.value, ph: e.placeholder, vis: e.offsetParent !== null, max: e.maxLength }));
+  ok(f0.vis && f0.v === "" && f0.ph === "t.ex. Värdens lag" && f0.max === 20, "host's lobby: the team field is there, empty, placeholder built from the host's name", JSON.stringify(f0));
+  for (const [X, tag] of [[J, "desktop"], [P, "phone"]]) {
+    const s = await seen(X.page);
+    ok(s.phase === "lobby" && s.team === "" && !s.drawn && !!s.card, `${tag} joiner, host without a name: the lobby shows no team line`, box(s));
+  }
+  await shot(H.page, "host-lobby-empty-desktop");
+  await shot(J.page, "joiner-lobby-noname-desktop"); await shot(P.page, "joiner-lobby-noname-phone");
+  // typed in the lobby: the joiners see it within a couple of seconds; a change too
+  for (const name of ["Testlaget", "Andra laget"]) {
+    await H.page.fill("#team", name);
+    const [tj, tp] = await Promise.all([waitTeam(J.page, name), waitTeam(P.page, name)]);
+    ok(tj >= 0 && tp >= 0, `host types "${name}": both joiners show it in their lobby within 3 s`, `desktop ${tj} ms, phone ${tp} ms`);
+  }
+  ok(await H.page.evaluate(() => localStorage.getItem("livboj-team")) === "Andra laget", "…saved as livboj-team");
+  await shot(J.page, "joiner-lobby-name-desktop"); await shot(P.page, "joiner-lobby-name-phone");
+  // sanitising on the host: control characters stripped, spaces trimmed (the input caps at 20)
+  await H.page.fill("#team", "  Ny\u0007tt ‮lag  "); await H.page.locator("#team").blur();
+  const tc = await waitTeam(J.page, "Nytt lag");
+  ok(tc >= 0 && (await H.page.$eval("#team", (e) => e.value)) === "Nytt lag", "control/bidi characters and outer spaces are stripped (the field shows the cleaned name after leaving it)", `${tc} ms`);
+  // long names: 20 of the widest letter, and one with åäö and an emoji (20 UTF-16 units) — inside the card on both sizes
+  for (const name of ["WWWWWWWWWWWWWWWWWWWW", "Wåhlströms Ölgäng 🛟"]) {
+    await H.page.fill("#team", name);
+    const [tj, tp] = await Promise.all([waitTeam(J.page, name), waitTeam(P.page, name)]);
+    const sj = await seen(J.page), sp = await seen(P.page);
+    ok(tj >= 0 && tp >= 0 && fits(sj) && fits(sp), `"${name}" (${name.length} chars) in the lobby: inside the card on desktop and phone`, `desktop ${box(sj)}; phone ${box(sp)}`);
+    const tag = /^W+$/.test(name) ? "w20" : "emoji";
+    await shot(J.page, `joiner-lobby-${tag}-desktop`); await shot(P.page, `joiner-lobby-${tag}-phone`);
+  }
+  const NAME = "Wåhlströms Ölgäng 🛟";
+  await shot(H.page, "host-lobby-filled-desktop");
+  { // the host's DOM lobby on a phone: the field fits the card (no horizontal overflow)
+    await H.page.setViewportSize({ width: 844, height: 390 }); await sleep(300);
+    const m = await H.page.evaluate(() => { const e = document.getElementById("team"), c = document.getElementById("lobby"), r = e.getBoundingClientRect(), cr = c.getBoundingClientRect(); return { l: r.left, r: r.right, cl: cr.left, cr: cr.right, sw: c.scrollWidth, cw: c.clientWidth }; });
+    await H.page.evaluate(() => document.getElementById("team").scrollIntoView({ block: "center" }));
+    await shot(H.page, "host-lobby-filled-phone-size");
+    ok(m.l >= m.cl && m.r <= m.cr && m.sw <= m.cw + 1, "host's lobby at 844x390: the team field fits the card", JSON.stringify(m));
+    await H.page.setViewportSize({ width: 1366, height: 768 }); await sleep(300);
+  }
+  // start: fixed for this game
+  await H.page.click("#start");
+  ok(await phaseIs(J.page, ["intro", "play"]) && await phaseIs(P.page, ["intro", "play"]), "the game starts for both joiners");
+  const fixed = await H.page.evaluate(() => window.livboj.setTeam("Fusk"));
+  await sleep(800);
+  ok(fixed === NAME && (await seen(J.page)).team === NAME, "after the start the name is fixed (setTeam is refused mid-game)", `setTeam -> ${fixed}`);
+  // the level board
+  await H.page.evaluate(() => { const S = window.__S; S.caught = 99; S.phase = "cleared"; });
+  ok(await phaseIs(J.page, "cleared") && await phaseIs(P.page, "cleared"), "level board on every page");
+  await sleep(900);
+  for (const [X, tag] of [[H, "host-desktop"], [J, "joiner-desktop"], [P, "joiner-phone"]]) {
+    const s = await seen(X.page);
+    ok(s.drawn && s.drawn.text === NAME && fits(s), `level board (${tag}): the team name under the title, inside the card`, box(s));
+    await shot(X.page, `cleared-${tag}`);
+  }
+  // game over: every end screen shows it, the stubbed leaderboard POST carries it
+  await setScoreAndQuit(H.page, 321);
+  ok(await phaseIs(J.page, "over") && await phaseIs(P.page, "over"), "game over on every page");
+  await sleep(1500);
+  for (const [X, tag] of [[H, "host-desktop"], [J, "joiner-desktop"], [P, "joiner-phone"]]) {
+    const s = await seen(X.page);
+    ok(s.drawn && s.drawn.text === NAME && fits(s), `game over (${tag}): the team name on the end screen, inside the card`, box(s));
+    await shot(X.page, `over-${tag}`);
+  }
+  let e1 = results(H.log).find((e) => e.score === 321);
+  ok(e1 && e1.team === NAME, "the stubbed leaderboard POST has the team's name", e1 ? JSON.stringify({ team: e1.team, score: e1.score, n: e1.n }) : `posts ${H.log.posts.length}`);
+  ok(!results(J.log).length && !results(P.log).length, "…and the joiners post nothing");
+  // the win screen (phase set directly: screenshots and the line only)
+  await H.page.evaluate(() => { window.__S.phase = "win"; });
+  ok(await phaseIs(J.page, "win") && await phaseIs(P.page, "win"), "win screen on every page");
+  await sleep(1200);
+  for (const [X, tag] of [[H, "host-desktop"], [J, "joiner-desktop"], [P, "joiner-phone"]]) {
+    const s = await seen(X.page);
+    ok(s.drawn && s.drawn.text === NAME && fits(s), `win (${tag}): the team name on the end screen, inside the card`, box(s));
+    await shot(X.page, `win-${tag}`);
+  }
+  // "Till lobbyn" (Enter): the field is editable again; clearing it removes the line and the result has no team, as before
+  await H.page.keyboard.press("Enter");
+  ok(await phaseIs(J.page, "lobby"), "back in the lobby (Till lobbyn)");
+  await sleep(300);
+  const f1 = await H.page.$eval("#team", (e) => ({ v: e.value, vis: e.offsetParent !== null, dis: e.disabled || e.readOnly }));
+  ok(f1.vis && !f1.dis && f1.v === NAME, "…the host's field shows the name and is editable again", JSON.stringify(f1));
+  await H.page.fill("#team", "");
+  const [cj, cp] = await Promise.all([waitTeam(J.page, ""), waitTeam(P.page, "")]);
+  ok(cj >= 0 && cp >= 0, "host clears the name: the joiners' lobby line goes away", `desktop ${cj} ms, phone ${cp} ms`);
+  ok(await H.page.evaluate(() => localStorage.getItem("livboj-team")) === "" && (await H.page.$eval("#team", (e) => e.value)) === "", "…saved empty; the placeholder is only a placeholder (the value stays empty)");
+  await H.page.click("#start");
+  ok(await phaseIs(J.page, ["intro", "play"]), "a second game starts");
+  await sleep(500);
+  await H.page.evaluate(() => { window.__S.caught = 99; window.__S.phase = "cleared"; });
+  await phaseIs(J.page, "cleared"); await sleep(600);
+  const sClr = await seen(J.page);
+  ok(!sClr.drawn && !!sClr.card, "no name: the joiner's level board has no team line", box(sClr));
+  await setScoreAndQuit(H.page, 123);
+  await phaseIs(J.page, "over"); await sleep(1500);
+  const sOver = await seen(J.page);
+  ok(!sOver.drawn && !!sOver.card, "no name: the end screen has no team line", box(sOver));
+  e1 = results(H.log).find((e) => e.score === 123);
+  ok(e1 && e1.team === "", "no name: the result's team is empty, as before (the leaderboard shows \"Lag\")", e1 ? JSON.stringify({ team: e1.team, score: e1.score }) : "no post");
+  // host change: with a name set the host disappears mid-level; the promoted joiner records the result with the name
+  await H.page.keyboard.press("Enter");
+  await phaseIs(J.page, "lobby");
+  await H.page.fill("#team", "Kvarlaget");
+  ok(await waitTeam(J.page, "Kvarlaget") >= 0 && await waitTeam(P.page, "Kvarlaget") >= 0, "a new name for the next game reaches both joiners");
+  await H.page.click("#start");
+  await phaseIs(J.page, "play"); await phaseIs(P.page, "play");
+  await H.context.close();
+  let NH = null;
+  try { await Promise.race([J, P].map((X) => X.page.waitForFunction(() => window.livboj.debug().authoritative, null, { timeout: 20000 }).then(() => { NH = NH || X; }))); } catch {}
+  ok(!!NH, `host gone: a joiner takes over (${NH === J ? "desktop" : NH === P ? "phone" : "none"})`);
+  if (NH) {
+    const other = NH === J ? P : J;
+    await sleep(1500);
+    const sn = await seen(NH.page), so = await seen(other.page);
+    ok(sn.auth && sn.team === "Kvarlaget" && !so.auth && so.team === "Kvarlaget", "…it keeps the team's name, and its own snapshots carry it to the other joiner", `new host ${sn.team}, other ${so.team}`);
+    await setScoreAndQuit(NH.page, 77);
+    await phaseIs(NH.page, "over"); await phaseIs(other.page, "over"); await sleep(1500);
+    const e2 = results(NH.log).find((e) => e.score === 77);
+    ok(e2 && e2.team === "Kvarlaget", "the promoted host's stubbed leaderboard POST carries the team's name", e2 ? JSON.stringify({ team: e2.team, score: e2.score, n: e2.n }) : `posts ${NH.log.posts.length}`);
+    const s2 = await seen(other.page);
+    ok(s2.drawn && s2.drawn.text === "Kvarlaget", "…and the other joiner's end screen shows it", box(s2));
+  }
+  ok(!H.errors.length && !J.errors.length && !P.errors.length, "no console/page errors on any page", [...H.errors, ...J.errors, ...P.errors].join(" | "));
+  await J.context.close(); await P.context.close();
+
+  // mixed builds: the snapshot is the protocol between builds for ~10 minutes after a deploy
+  const old = (f) => execFileSync("git", ["show", `7f25a39:${f}`], { cwd: ROOT, encoding: "utf8" });
+  const OLD = { "/game.js": old("game.js"), "/hud.js": old("hud.js"), "/host.html": old("host.html") };
+  ok(!/\bteam: team\b|cleanTeam/.test(OLD["/game.js"]), "7f25a39's game.js is the build without the snapshot field");
+  { // an old host (named team at its setup screen, never sent) + a new joiner
+    server.overrides.clear(); for (const [k, v] of Object.entries(OLD)) server.overrides.set(k, v);
+    const r = newRoom(), OH = await newPage({ w: 1366, h: 768 }), NJ = await newPage({ w: 1366, h: 768 });
+    await OH.page.goto(url("host.html", `room=${r}`), { waitUntil: "load" });
+    await OH.page.waitForFunction(() => !!document.getElementById("create"));
+    await OH.page.fill("#name", "Gammal"); await OH.page.fill("#team", "Gamla laget"); await OH.page.click("#create");
+    await OH.page.waitForFunction(() => !!window.livboj);
+    ok(await OH.page.evaluate(() => typeof window.livboj.setTeam === "undefined"), "old host: the 7f25a39 build is running (no setTeam)");
+    server.overrides.clear();
+    await join(NJ, r, "Ny gäst");
+    const met = await NJ.page.waitForFunction(() => window.livboj.debug().n === 2 && window.livboj.debug().phase === "lobby", null, { timeout: 20000 }).then(() => true, () => false);
+    await sleep(800);
+    let s = await seen(NJ.page);
+    ok(met && s.team === "" && !s.drawn && !!s.card, "old host -> new joiner: the snapshot has no team field; the lobby shows no line, no errors", `${box(s)} ${NJ.errors.join(" | ")}`);
+    await OH.page.click("#start");
+    ok(await phaseIs(NJ.page, ["intro", "play"]), "…the game starts for the new joiner");
+    await sleep(500);
+    s = await seen(NJ.page);
+    ok(s.team === "" && !NJ.errors.length && !OH.errors.length, "…nothing shown, no errors on either page", [...OH.errors, ...NJ.errors].join(" | "));
+    await OH.context.close(); await NJ.context.close();
+  }
+  { // a new host with a name + an old joiner (it ignores the unknown field)
+    server.overrides.clear(); server.overrides.set("/game.js", hooked);
+    const r = newRoom(), NHo = await newPage({ w: 1366, h: 768 }), OJ = await newPage({ w: 1366, h: 768 });
+    await hostLobby(NHo, r, "Nyvärd");
+    await NHo.page.fill("#team", "Nya laget");
+    server.overrides.set("/game.js", OLD["/game.js"]); server.overrides.set("/hud.js", OLD["/hud.js"]);
+    await join(OJ, r, "Gammal gäst");
+    const met = await OJ.page.waitForFunction(() => window.livboj.debug().n === 2, null, { timeout: 20000 }).then(() => true, () => false);
+    server.overrides.clear(); server.overrides.set("/game.js", hooked);
+    await sleep(1000);
+    const d = await OJ.page.evaluate(() => { const d = window.livboj.debug(); return { team: d.team, phase: d.phase, n: d.n, drawn: !!d.hud._team }; });
+    ok(met && d.team === undefined && d.phase === "lobby" && !d.drawn, "new host -> old joiner (7f25a39): it joins the lobby; it knows nothing of the name", JSON.stringify(d));
+    await NHo.page.click("#start");
+    ok(await phaseIs(OJ.page, ["intro", "play"]), "…the game starts for the old joiner");
+    await phaseIs(OJ.page, "play");
+    await setScoreAndQuit(NHo.page, 55);
+    ok(await phaseIs(OJ.page, "over"), "…and it reaches the end screen");
+    await sleep(800);
+    const e3 = results(NHo.log).find((e) => e.score === 55);
+    ok(e3 && e3.team === "Nya laget", "…the new host's result has the name", e3 ? e3.team : "no post");
+    ok(!OJ.errors.length && !NHo.errors.length, "…no errors on either page", [...NHo.errors, ...OJ.errors].join(" | "));
+    await NHo.context.close(); await OJ.context.close();
+  }
+  server.overrides.clear();
 }
 
 // ---------------------------------------------------------------- Nyheter + Förslagslåda

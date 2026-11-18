@@ -209,12 +209,27 @@ export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
   };
 }
 
+// A team name from the host's field or from the wire (a joiner never trusts the
+// snapshot): text only — no control, line-separator or bidi-override characters —
+// whitespace collapsed, trimmed, at most 20 UTF-16 units (the input's maxlength
+// and the relay's cap), never ending in half an emoji. "" = no name.
+export function cleanTeam(s) {
+  if (typeof s !== "string") return "";
+  let t = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "").replace(/\s+/g, " ").trim().slice(0, 20);
+  if (/[\ud800-\udbff]$/.test(t)) t = t.slice(0, -1);
+  return t.trim();
+}
+
 // ==========================================================================
 export function createGame(canvas, opts) {
   const CW = canvas.width, CH = canvas.height;
   const mode = opts.mode; // 'solo' | 'host' | 'join'
   const myName = (opts.name || "Spelare").slice(0, 14);
-  const myTeam = (opts.team || "").trim().slice(0, 20); // optional, host only
+  // The team's name (optional; hosted games only). The host may change it in the
+  // lobby (setTeam); it is fixed from the start of a game, sent to the joiners in
+  // every snapshot (`team`) and written into the leaderboard result. A joiner
+  // keeps the host's (lastView.team) and takes it over if it becomes the host.
+  let team = mode === "host" ? cleanTeam(opts.team) : "";
   const cbs = opts.cbs || {};
 
   let authoritative = mode !== "join"; // solo & host run the sim; join receives
@@ -372,7 +387,7 @@ export function createGame(canvas, opts) {
   function recordResult() {
     if (S.score <= 0) return; // nothing rescued: not a result worth listing
     const entry = withEntryId({
-      score: S.score, level: S.levelIndex + 1, won: S.phase === Phase.WIN, n: S.players.size, ts: Date.now(), team: myTeam,
+      score: S.score, level: S.levelIndex + 1, won: S.phase === Phase.WIN, n: S.players.size, ts: Date.now(), team,
       duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: S.totalCaught, combo: S.bestCombo,
       // team total in `score`; per-player breakdown here, best first.
       players: [...S.players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 })).sort((a, b) => b.score - a.score),
@@ -476,6 +491,9 @@ export function createGame(canvas, opts) {
   // ---- State sync ---------------------------------------------------------
   // The snapshot format is the wire protocol between host and joiners (who may
   // run an older or newer build for a few minutes after a deploy): keep it as is.
+  // Only ever ADD optional fields (an old joiner ignores them; a new joiner must
+  // cope with an old host that lacks them): `team` (2026-11) is the team's name,
+  // left out when there is none.
   function pushState() {
     if (!sendState) return;
     const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
@@ -491,6 +509,7 @@ export function createGame(canvas, opts) {
       fx: S.fxOut,
       // joiners only ever see team games, so send the top team entries (not solo runs)
       board: (S.phase === Phase.LOBBY || S.phase === Phase.OVER || S.phase === Phase.WIN) ? board.filter((e) => e.n >= 2).slice(0, BOARD_SHOW) : undefined,
+      team: team || undefined, // optional: the team's name (none: left out)
     };
     S.fxOut = [];
     try { sendState(snap); } catch {}
@@ -506,6 +525,7 @@ export function createGame(canvas, opts) {
       obstacles: (d.obstacles || []).map((o) => ({ x: o[0], y: o[1], w: o[2], h: o[3] })),
       swamps: (d.swamps || []).map((z) => ({ x: z[0], y: z[1], w: z[2], h: z[3] })),
       whirls: (d.whirls || []).map((z) => ({ x: z[0], y: z[1], r: z[2] })),
+      team: cleanTeam(d.team), // "" from a host without a name, or from an older host build
     };
     if (d.board) netBoard = d.board;
     lastView.board = netBoard;
@@ -557,6 +577,7 @@ export function createGame(canvas, opts) {
     if (authoritative) return;
     authoritative = true; promoted = true; hostId = selfId;
     const v = lastView;
+    team = v.team || ""; // the team keeps its name: the result this host records (and its snapshots) carry it
     S.world = v.world; S.obstacles = v.obstacles.map((o) => ({ ...o })); S.swamps = (v.swamps || []).map((z) => ({ ...z })); S.whirls = (v.whirls || []).map((z) => ({ ...z }));
     S.levelIndex = v.levelIndex; S.score = v.score; S.caught = v.caught; S.missed = v.missed; S.timeLeft = v.timeLeft; S.phase = v.phase;
     const L = levelParams(S.levelIndex, Math.max(1, iPlayer.size));
@@ -594,11 +615,11 @@ export function createGame(canvas, opts) {
         players: [...iPlayer.values()].map((p) => p.id === selfId ? { ...p, x: selfPos.x, y: selfPos.y } : p),
         splashes: jSplashes,
         hud: { score: lastView.score, yourScore: (iPlayer.get(selfId) || {}).score || 0, level: lastView.levelIndex, caught: lastView.caught, quota: lastView.quota, missed: lastView.missed, allowedMisses: lastView.allowedMisses, n: iPlayer.size },
-        phase: lastView.phase, introTimer: lastView.introTimer, board: lastView.board || [],
+        phase: lastView.phase, introTimer: lastView.introTimer, board: lastView.board || [], team: lastView.team || "",
       };
     }
     const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
-    return { world: S.world, obstacles: S.obstacles, swamps: S.swamps, whirls: S.whirls, swimmers: S.swimmers, monsters: S.monsters, players: [...S.players.values()], splashes: S.splashes, hud: { score: S.score, yourScore: (S.players.get(selfId) || {}).score || 0, level: S.levelIndex, caught: S.caught, quota: L.quota, missed: S.missed, allowedMisses: L.allowedMisses, n: S.players.size }, phase: S.phase, introTimer: S.introTimer, board };
+    return { world: S.world, obstacles: S.obstacles, swamps: S.swamps, whirls: S.whirls, swimmers: S.swimmers, monsters: S.monsters, players: [...S.players.values()], splashes: S.splashes, hud: { score: S.score, yourScore: (S.players.get(selfId) || {}).score || 0, level: S.levelIndex, caught: S.caught, quota: L.quota, missed: S.missed, allowedMisses: L.allowedMisses, n: S.players.size }, phase: S.phase, introTimer: S.introTimer, board, team };
   }
 
   // ---- Loop ---------------------------------------------------------------
@@ -676,13 +697,16 @@ export function createGame(canvas, opts) {
   requestAnimationFrame(frame);
 
   return {
-    hostStart, getRoom: () => opts.room, relay: () => (room && room.stats ? room.stats() : null), roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
+    hostStart, getRoom: () => opts.room,
+    // the host's lobby field: a new team name, taken only in the lobby (fixed once a game has started) -> the name in use
+    setTeam: (s) => { if (mode === "host" && authoritative && S.phase === Phase.LOBBY) { const t = cleanTeam(s); if (t !== team) { team = t; pushState(); } } return team; },
+    team: () => team, relay: () => (room && room.stats ? room.stats() : null), roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
     board: () => ({ source: boardSource, entries: board.slice(0, BOARD_SHOW) }),
     signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
     water: () => R.water.info(), _waterStepDown: () => R.water._stepDown(), // tests: the water layer's mode / quality ladder
     _jump: (idx) => { if (authoritative) { S.levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(S.levelIndex); S.phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
-      authoritative, promoted,
+      authoritative, promoted, team: authoritative ? team : (lastView ? lastView.team : ""),
       phase: authoritative ? S.phase : (lastView && lastView.phase),
       timeLeft: Math.round(authoritative ? S.timeLeft : (lastView ? lastView.timeLeft : -1)),
       n: authoritative ? S.players.size : iPlayer.size, hasState: !!lastView,

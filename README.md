@@ -56,6 +56,13 @@ Multiplayer and the leaderboard use the live relay by default; add
 3. The host presses *Starta spelet*. The host runs the game; everyone else sends their own position.
    If the host drops out, the remaining players elect a new host and the game goes on.
 
+**Team name (optional).** The host can type one in the lobby (`host.html`, max 20 characters; the
+placeholder is only an example from the host's name). It reaches the joiners in the host's state
+(`team`, an optional field of the snapshot, left out when empty), shows under the title of the lobby,
+level board and end screens, and goes into the leaderboard result. It is fixed once a game starts and
+editable again back in the lobby (*Till lobbyn*). A promoted host keeps it. No name: nothing is shown,
+and the leaderboard says *Lag* as before. Solo games have none.
+
 Transport is the WebSocket relay (`relay/`), which works on office networks that block WebRTC.
 The client reconnects by itself (short backoff, when the page returns from the background, when
 the network comes back) without dropping anyone from the roster.
@@ -106,7 +113,7 @@ node tools/sim-test.mjs           # the rules and layouts (sim.js) in plain node
 node tools/bot.mjs --strategy near --sim /tmp/old-sim.js   # difficulty: a bot plays every level (compare two sim.js)
 npm install                       # once: Playwright for the tools below (or it is found in the npx cache)
 node tools/smoke.mjs              # layout, fullscreen, water layer, HUD see-through, every button by click/tap, input, leaderboard queue, cache busting (leaderboard always stubbed)
-node tools/smoke.mjs --live       # + host/join and forced reconnects through the live relay
+node tools/smoke.mjs --live       # + host/join, forced reconnects and the team name (incl. old/new builds mixed) through the live relay
 node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
 node tools/shot.mjs               # screenshots of menu + solo game at desktop and phone sizes -> shots/
 ```

@@ -162,10 +162,6 @@
       <label for="name">Ditt namn (krävs)</label>
       <input id="name" maxlength="14" placeholder="t.ex. Philip" required autocomplete="off" />
     </div>
-    <div class="field">
-      <label for="team">Lagnamn (valfritt — visas i topplistan)</label>
-      <input id="team" maxlength="20" placeholder="t.ex. Kundtjänst" autocomplete="off" />
-    </div>
     <button id="create" class="btn" disabled>Skapa lobby</button>
     <a class="backlink" href="index.html">← Tillbaka</a>
   </div>
@@ -184,6 +180,11 @@
         <div class="code small" id="shareLine" style="letter-spacing:0;font-size:13px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:12px">—</div>
         <button class="btn ghost" id="copyLink">Kopiera</button>
       </div>
+    </div>
+    <div class="field">
+      <label for="team">Lagnamn (valfritt — visas för alla och i topplistan)</label>
+      <input id="team" maxlength="20" autocomplete="off" enterkeyhint="done" />
+      <div class="muted">Kan ändras tills spelet startar.</div>
     </div>
     <div class="field">
       <label>Spelare i lobbyn (upp till 12)</label>
@@ -293,18 +294,35 @@
   nameEl.addEventListener("input", updateGate);
   updateGate();
 
+  // The team's name: optional, typed in the lobby. It reaches the joiners (in the host's state) a moment
+  // after the typing stops, is saved for next time, and is fixed once the game starts (game.js setTeam
+  // takes it only in the lobby, cleaned: trimmed, max 20, no control characters). Back in the lobby
+  // after a game ("Till lobbyn") it can be changed again. Empty is fine: the leaderboard says "Lag".
+  let teamT = 0;
+  function applyTeam() {
+    clearTimeout(teamT); teamT = 0;
+    if (!api || !api.setTeam) return;
+    const t = api.setTeam(teamEl.value);
+    if (document.activeElement !== teamEl && teamEl.value !== t) teamEl.value = t; // show what is in use (cleaned)
+    try { localStorage.setItem("livboj-team", t); } catch {}
+  }
+  teamEl.addEventListener("input", () => { clearTimeout(teamT); teamT = setTimeout(applyTeam, 400); });
+  teamEl.addEventListener("change", applyTeam); // (blur: at once)
+  teamEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); teamEl.blur(); applyTeam(); } });
+  // an example built from the host's name, as a greyed placeholder only ("Philips lag", "Hans lag", "Max lag")
+  const teamExample = (n) => `t.ex. ${/[sxz]$/i.test(n) ? n : n + "s"} lag`;
+
   createBtn.onclick = () => {
     if (!nameOk()) { nameEl.focus(); return; }
     const name = (nameEl.value || "").trim().slice(0, 14);
-    const team = (teamEl.value || "").trim().slice(0, 20);
-    try { localStorage.setItem("livboj-name", name); localStorage.setItem("livboj-team", team); } catch {}
+    try { localStorage.setItem("livboj-name", name); } catch {}
     codeText.textContent = room;
     shareLine.textContent = joinUrl.href;
-    if (team) { const t = document.createElement("div"); t.className = "muted"; t.textContent = `Lag: ${team}`; t.style.textAlign = "center"; lobby.insertBefore(t, lobby.firstChild); }
+    teamEl.placeholder = teamExample(name);
     setup.hidden = true; lobby.hidden = false;
     renderRoster([]);
     api = window.livboj = createGame(canvas, {
-      mode: "host", name, team, room,
+      mode: "host", name, team: teamEl.value, room,
       cbs: {
         onRoster: renderRoster,
         onBoard: renderBoard,
@@ -313,11 +331,13 @@
           lobby.hidden = !inLobby;
           brand.hidden = !inLobby;
           setPlaying(!inLobby);
+          if (inLobby && api && api.team && document.activeElement !== teamEl) teamEl.value = api.team(); // back from a game: editable again
         },
       },
     });
+    if (api.team) teamEl.value = api.team(); // a saved name, cleaned
   };
-  document.getElementById("start").onclick = () => { if (api) api.hostStart(); };
+  document.getElementById("start").onclick = () => { if (api) { applyTeam(); api.hostStart(); } };
   // live network diagnostics in the lobby (signaling / STUN / TURN / relay)
   const netEl = document.getElementById("net");
   setInterval(() => {
