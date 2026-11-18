@@ -3,7 +3,7 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,water,hud,buttons,keys,board,cache,menu,forslag,live,team
+//   node tools/smoke.mjs --only layout,fullscreen,water,hud,buttons,keys,board,cache,menu,forslag,leave,live,team,leavemp
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //   node tools/smoke.mjs --only team --shots /tmp/team              # + screenshots of the team-name screens
 //
@@ -25,13 +25,18 @@
 // field -> every joiner's lobby / level / end screens -> the leaderboard result, a
 // promoted host keeps it, mixed old/new builds). The rules themselves: tools/sim-test.mjs.
 //
-// The leaderboard is ALWAYS stubbed (harness.mjs stubBoard): no test posts to the real board.
+// leave: a solo game left mid-game (page closed, hidden then killed, hidden and back, bfcache, score 0)
+// gives exactly one row like any other and the right anonymous counters; leavemp (needs a local
+// --relay): the same for a hosted game whose host and then last player leave, and one the host ends.
+//
+// The leaderboard is ALWAYS stubbed (harness.mjs stubBoard, or the stand-in relay harness.mjs
+// fakeRelay for requests sent while a page unloads): no test posts to the real board or counters.
 import { serve, launch, stubBoard } from "./harness.mjs";
 
 const args = {}; const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith("--")) { const v = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true"; args[a.slice(2)] = v; } }
 const ONLY = args.only ? new Set(args.only.split(",")) : null;
-const LIVE = new Set(["live", "team"]); // these go through the relay: only with --live (or --only)
+const LIVE = new Set(["live", "team", "leavemp"]); // these go through a relay: only with --live (or --only); leavemp only with a local --relay
 const want = (k) => (ONLY ? ONLY.has(k) : !LIVE.has(k) || args.live === "true");
 const RELAY_Q = args.relay ? `relay=${encodeURIComponent(args.relay)}` : "";
 
@@ -500,12 +505,17 @@ if (want("keys")) {
 
 // ---------------------------------------------------------------- leaderboard outbox
 async function scoreAndQuit(page) {
-  // a tiny bot: arrow keys towards the nearest swimmer until one is rescued, then end the game
+  const caught = await scoreSome(page);
+  await page.evaluate(() => window.livboj.quitGame());
+  return caught;
+}
+// a tiny bot: arrow keys towards the nearest swimmer until `want` have been rescued in this level -> caught
+async function scoreSome(page, want = 1) {
   const deadline = Date.now() + 40000; const held = new Set();
   const set = async (k, on) => { if (on && !held.has(k)) { held.add(k); await page.keyboard.down(k); } else if (!on && held.has(k)) { held.delete(k); await page.keyboard.up(k); } };
   while (Date.now() < deadline) {
     const d = await page.evaluate(() => window.livboj.debug());
-    if (d.caught > 0) break;
+    if (d.caught >= want) break;
     if (d.phase !== "play" || !d.sw.length) { await sleep(100); continue; }
     const t = d.sw.reduce((b, s) => (Math.hypot(s[0] - d.self.x, s[1] - d.self.y) < Math.hypot(b[0] - d.self.x, b[1] - d.self.y) ? s : b));
     const dx = t[0] - d.self.x, dy = t[1] - d.self.y;
@@ -513,9 +523,7 @@ async function scoreAndQuit(page) {
     await sleep(60);
   }
   for (const k of [...held]) await set(k, false);
-  const caught = await page.evaluate(() => window.livboj.debug().caught);
-  await page.evaluate(() => window.livboj.quitGame());
-  return caught;
+  return page.evaluate(() => window.livboj.debug().caught);
 }
 if (want("board")) {
   console.log("board");
@@ -966,6 +974,301 @@ if (want("team")) {
     await NHo.context.close(); await OJ.context.close();
   }
   server.overrides.clear();
+}
+
+// ---------------------------------------------------------------- unfinished games + the anonymous counters
+// A page that unloads sends its requests past context.route (they reach the network), so these
+// sections point the game at a stand-in relay on 127.0.0.1 (harness fakeRelay: the relay's own Board
+// code on in-memory storage, every request logged) and use plain contexts: everything lands there.
+// A local relay also turns the counters on in an automated browser (net.js STAT_ON).
+const hiddenAs = (page, on) => page.evaluate((on) => { Object.defineProperty(document, "hidden", { configurable: true, get: () => on }); Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (on ? "hidden" : "visible") }); document.dispatchEvent(new Event("visibilitychange")); }, on);
+const pendingOf = (page) => page.evaluate(() => JSON.parse(localStorage.getItem("livboj-pending") || "{}"));
+async function plainPage(w = 1366, h = 768, context) {
+  context = context || await browser.newContext({ viewport: { width: w, height: h } });
+  const page = await context.newPage(), errors = [];
+  page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
+  page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+  return { context, page, errors };
+}
+if (want("leave")) {
+  console.log("leave (solo; stand-in relay on 127.0.0.1 running relay/src/index.js Board)");
+  const { fakeRelay } = await import("./harness.mjs");
+  const fake = await fakeRelay();
+  const Q = `relay=${encodeURIComponent(fake.url)}`;
+  const open = async (page) => { await page.goto(`${BASE}index.html?${Q}`, { waitUntil: "load" }); await page.waitForFunction(() => document.getElementById("solo") && document.getElementById("boardSrc").textContent !== "hämtar…", null, { timeout: 15000 }); };
+  const evts = (from = 0) => fake.stats().slice(from).map((s) => s.e);
+  const count = (list, e) => list.filter((x) => x === e).length;
+  const postsFor = (id) => fake.boardPosts().filter((e) => e && e.id === id);
+  const rowsFor = async (id) => (await fake.rows()).filter((e) => e.id === id);
+  const dbg = (page) => page.evaluate(() => { const d = window.livboj.debug(); return { gid: d.gid, score: d.score, phase: d.phase, game: d.game }; });
+  const keys = (e) => Object.keys(e).sort().join(",");
+  let loads = 0;
+
+  // a normal game: its row is the model for every other; the counters
+  const A = await plainPage();
+  let s0 = 0;
+  await open(A.page); loads++;
+  await startSolo(A.page); await waitPlay(A.page);
+  const g0 = (await dbg(A.page)).gid;
+  ok(/^g[0-9a-z]+-[0-9a-z]+$/.test(g0), "a solo game has a game id (the entry id of its result)", g0);
+  await scoreAndQuit(A.page); await sleep(1200);
+  const normal = postsFor(g0);
+  ok(normal.length === 1 && normal[0].score > 0, "game over: one POST with the game's id", `${normal.length} posts, score ${normal[0] && normal[0].score}`);
+  let ev = evts(s0);
+  ok(count(ev, "visit") === 1 && count(ev, "solo_start") === 1 && count(ev, "solo_done") === 1 && count(ev, "solo_abandoned") === 0, "counters: one visit, one solo_start, one solo_done", ev.join(","));
+  s0 = fake.stats().length;
+  await A.page.keyboard.press("Enter"); await waitPlay(A.page); // "Spela igen"
+  const g1 = (await dbg(A.page)).gid;
+  ev = evts(s0);
+  ok(g1 && g1 !== g0 && count(ev, "solo_start") === 1 && count(ev, "visit") === 0, "\"Spela igen\": a new game id and a second solo_start (no visit)", `${g1} ${ev.join(",")}`);
+  await A.page.evaluate(() => window.livboj._jump(1)); await sleep(300);
+  ok(count(evts(s0), "solo_start") === 1, "a level change is not a new game");
+
+  // left with points: the page is closed -> one row like any other, at once (keepalive), and one solo_abandoned
+  s0 = fake.stats().length;
+  await scoreSome(A.page);
+  const left1 = await dbg(A.page);
+  await A.page.close(); await sleep(1500);
+  let p1 = postsFor(g1);
+  ok(p1.length === 1 && p1[0].score === left1.score && left1.score > 0, "page closed mid-game (score > 0): exactly one POST with the score so far, sent while closing", `${p1.length} posts, ${p1[0] && p1[0].score} vs ${left1.score}`);
+  ok(p1[0] && keys(p1[0]) === keys(normal[0]), "…the row has exactly the keys of a game-over row", p1[0] && keys(p1[0]));
+  ok(p1[0] && p1[0].n === 1 && p1[0].players.length === 1 && p1[0].players[0].name === "Testaren" && p1[0].players[0].score === left1.score && p1[0].level === 2 && p1[0].duration > 0 && p1[0].won === false, "…same data: player, score, level reached, duration, n", JSON.stringify(p1[0]));
+  ev = evts(s0);
+  ok(count(ev, "solo_abandoned") === 1 && count(ev, "solo_done") === 0, "…one solo_abandoned, no solo_done", ev.join(","));
+  // the keepalive POST got through, but the page was gone before its answer: the outbox still has it
+  const B = await plainPage(0, 0, A.context);
+  s0 = fake.stats().length;
+  await open(B.page); loads++; await sleep(1500);
+  p1 = postsFor(g1);
+  const r1 = await rowsFor(g1);
+  ok(p1.length === 2 && r1.length === 1 && r1[0].score === left1.score, "next load: the outbox sends it again — still one row (merged by id)", `${p1.length} posts, ${r1.length} rows`);
+  ok(!(await B.page.evaluate(() => localStorage.getItem("livboj-board-queue"))) && !Object.keys(await pendingOf(B.page)).length, "…outbox and pending empty afterwards");
+  ev = evts(s0);
+  ok(count(ev, "visit") === 1 && count(ev, "solo_abandoned") === 0, "…and it is not counted again", ev.join(","));
+
+  // left at score 0: no row, but counted
+  await startSolo(B.page); await waitPlay(B.page);
+  const g2 = (await dbg(B.page)).gid;
+  s0 = fake.stats().length;
+  await B.page.close(); await sleep(1500);
+  ev = evts(s0);
+  ok(postsFor(g2).length === 0 && count(ev, "solo_abandoned") === 1, "page closed at score 0: no leaderboard row, one solo_abandoned", `${postsFor(g2).length} posts; ${ev.join(",")}`);
+
+  // hidden, back, finished: one row with the FINAL score, solo_done, nothing abandoned
+  const C = await plainPage();
+  await open(C.page); loads++;
+  await startSolo(C.page); await waitPlay(C.page);
+  const g3 = (await dbg(C.page)).gid;
+  s0 = fake.stats().length;
+  await scoreSome(C.page, 1);
+  await hiddenAs(C.page, true);
+  const pend3 = (await pendingOf(C.page))[g3];
+  ok(pend3 && pend3.kind === "solo" && pend3.entry && pend3.entry.score === (await dbg(C.page)).score, "hidden: the score so far is written down (pending), nothing sent", JSON.stringify(pend3 && { kind: pend3.kind, score: pend3.entry && pend3.entry.score }));
+  { // another tab of the game opens meanwhile: the hidden page still holds its game's lock, so its pending copy is left alone
+    const T = await plainPage(0, 0, C.context);
+    await open(T.page); loads++; await sleep(1000);
+    ok(!!(await pendingOf(T.page))[g3] && postsFor(g3).length === 0 && count(evts(s0), "solo_abandoned") === 0, "another tab loading meanwhile leaves a living page's pending game alone (Web Lock)");
+    await T.page.close();
+  }
+  await hiddenAs(C.page, false);
+  ok(!(await pendingOf(C.page))[g3], "visible again: the pending copy is dropped, the game goes on");
+  await scoreSome(C.page, 2);
+  const fin3 = (await dbg(C.page)).score;
+  await C.page.evaluate(() => window.livboj.quitGame()); await sleep(1200);
+  const p3 = postsFor(g3), r3 = await rowsFor(g3);
+  ev = evts(s0);
+  ok(p3.length === 1 && p3[0].score === fin3 && r3.length === 1 && r3[0].score === fin3, "…finished: exactly one row, with the final score", `${p3.length} posts, final ${fin3}`);
+  ok(count(ev, "solo_done") === 1 && count(ev, "solo_abandoned") === 0, "…one solo_done, no solo_abandoned", ev.join(","));
+
+  // bfcache (the events as a browser sends them): pagehide persisted keeps it pending; pageshow persisted drops it
+  await C.page.keyboard.press("Enter"); await waitPlay(C.page);
+  const g4 = (await dbg(C.page)).gid;
+  s0 = fake.stats().length;
+  await scoreSome(C.page, 1);
+  await C.page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+  await sleep(600);
+  ok(!!(await pendingOf(C.page))[g4] && postsFor(g4).length === 0 && count(evts(s0), "solo_abandoned") === 0, "pagehide into the bfcache: pending only, nothing sent");
+  await C.page.evaluate(() => dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  ok(!(await pendingOf(C.page))[g4], "restored from the bfcache: dropped, the game goes on");
+  await C.page.evaluate(() => window.livboj.quitGame()); await sleep(1000);
+  ev = evts(s0);
+  ok(postsFor(g4).length === 1 && count(ev, "solo_done") === 1 && count(ev, "solo_abandoned") === 0, "…finished: one row, one solo_done, no abandoned", ev.join(","));
+
+  // taken while away (another page adopted it, e.g. no Web Locks): back again -> no solo_done; the final row replaces that copy
+  await C.page.keyboard.press("Enter"); await waitPlay(C.page);
+  const g5 = (await dbg(C.page)).gid;
+  await scoreSome(C.page, 1);
+  await hiddenAs(C.page, true);
+  const taken = (await pendingOf(C.page))[g5];
+  await C.page.evaluate(() => localStorage.removeItem("livboj-pending")); // (as another page would, after posting `taken` and counting it)
+  await fetch(`${fake.http}/board`, { method: "POST", body: JSON.stringify({ entries: [taken.entry] }) });
+  s0 = fake.stats().length;
+  await hiddenAs(C.page, false);
+  await scoreSome(C.page, 2);
+  const fin5 = (await dbg(C.page)).score;
+  ok((await dbg(C.page)).game.counted === true, "pending copy taken by another page: this page knows the game was counted as left");
+  await C.page.evaluate(() => window.livboj.quitGame()); await sleep(1200);
+  const r5 = await rowsFor(g5);
+  ev = evts(s0);
+  ok(r5.length === 1 && r5[0].score === fin5 && fin5 > taken.entry.score, "…its final result replaces the earlier copy (the relay keeps the further one): one row, final score", `${taken.entry.score} -> ${r5[0] && r5[0].score}`);
+  ok(count(ev, "solo_done") === 0, "…and no solo_done (the game was counted once, as abandoned)", ev.join(","));
+  await C.context.close();
+
+  // hidden, then killed without any unload event (a phone): the next load posts it and counts it
+  const E = await plainPage();
+  await open(E.page); loads++;
+  await startSolo(E.page); await waitPlay(E.page);
+  const g6 = (await dbg(E.page)).gid;
+  await scoreSome(E.page, 1);
+  await hiddenAs(E.page, true);
+  const sc6 = (await dbg(E.page)).score;
+  s0 = fake.stats().length;
+  await sleep(500);
+  const cdp = await E.context.newCDPSession(E.page);
+  cdp.send("Page.crash").catch(() => {});
+  await sleep(1500);
+  ok(postsFor(g6).length === 0 && count(evts(s0), "solo_abandoned") === 0, "renderer killed while hidden (no pagehide): nothing sent yet");
+  const F = await plainPage(0, 0, E.context);
+  await open(F.page); loads++; await sleep(1500);
+  const p6 = postsFor(g6), r6 = await rowsFor(g6);
+  ev = evts(s0);
+  ok(p6.length === 1 && p6[0].score === sc6 && r6.length === 1, "next visit on that device: one row with the score at the time", `${p6.length} posts, ${p6[0] && p6[0].score} vs ${sc6}`);
+  ok(count(ev, "solo_abandoned") === 1 && count(ev, "visit") === 1, "…one solo_abandoned (counted on that later visit)", ev.join(","));
+  ok(!Object.keys(await pendingOf(F.page)).length, "…pending empty");
+  // the same, score 0: a marker only -> counted, no row
+  await startSolo(F.page); await waitPlay(F.page);
+  const g7 = (await dbg(F.page)).gid;
+  await hiddenAs(F.page, true); await sleep(500);
+  const m7 = (await pendingOf(F.page))[g7];
+  ok(m7 && m7.entry === null, "score 0, hidden: a marker without a row", JSON.stringify(m7));
+  s0 = fake.stats().length;
+  (await E.context.newCDPSession(F.page)).send("Page.crash").catch(() => {});
+  await sleep(800);
+  const G = await plainPage(0, 0, E.context);
+  await open(G.page); loads++; await sleep(1500);
+  ev = evts(s0);
+  ok(postsFor(g7).length === 0 && count(ev, "solo_abandoned") === 1, "…killed: next visit counts it (solo_abandoned), no row", ev.join(","));
+  ok(count(evts(), "visit") === loads, "one visit per page load", `${count(evts(), "visit")} visits, ${loads} loads`);
+  ok(fake.stats().every((s) => Object.keys(s).every((k) => k === "e" || k === "n")), "counter bodies carry only { e, n? }", JSON.stringify(fake.stats().slice(0, 3)));
+  ok(!A.errors.length && !B.errors.length && !E.errors.length && !G.errors.length, "no console/page errors", [...A.errors, ...B.errors, ...E.errors, ...G.errors].join(" | "));
+  await E.context.close(); await A.context.close().catch(() => {});
+  // automated browser + a non-local relay (the tools against the live relay): the counters stay silent
+  {
+    const X = await newPage({ w: 1366, h: 768 });
+    await openMenu(X.page, "relay=wss%3A%2F%2Fexample.invalid"); await startSolo(X.page); await waitPlay(X.page); await sleep(800);
+    ok(X.log.stats.length === 0 && await X.page.evaluate(() => navigator.webdriver === true), "automated browser with a non-local relay: no /stat request at all", `${X.log.stats.length} stat requests`);
+    await X.context.close();
+  }
+  { // …and a page closed mid-game sends nothing while unloading (that would get past the stubs, to a live
+    // relay): the result waits in the outbox for the next load. (A non-local name mapped to the stand-in relay.)
+    const port = new URL(fake.http).port, b2 = await launch({ args: [`--host-resolver-rules=MAP relay.livboj.test 127.0.0.1`] });
+    const ctx = await b2.newContext({ viewport: { width: 1366, height: 768 } }), pg = await ctx.newPage();
+    const q = `relay=${encodeURIComponent(`ws://relay.livboj.test:${port}`)}`;
+    const openX = async (p) => { await p.goto(`${BASE}index.html?${q}`, { waitUntil: "load" }); await p.waitForFunction(() => document.getElementById("solo") && document.getElementById("boardSrc").textContent !== "hämtar…", null, { timeout: 15000 }); };
+    await openX(pg); await startSolo(pg); await waitPlay(pg); await scoreSome(pg);
+    const gx = (await dbg(pg)).gid, n0 = fake.log.length;
+    await pg.close(); await sleep(1500);
+    const during = fake.log.slice(n0);
+    ok(during.length === 0, "automated browser, non-local relay: closing mid-game sends nothing during unload (no /board, no /stat)", during.map((x) => x.method + " " + x.path).join(", "));
+    const pg2 = await ctx.newPage(); await openX(pg2); await sleep(1500);
+    const after = fake.log.slice(n0);
+    ok(postsFor(gx).length === 1 && !after.some((x) => x.path === "/stat"), "…the next load posts it from the outbox (a normal, stubbable request); still no counters", after.map((x) => x.method + " " + x.path).join(", "));
+    await b2.close();
+  }
+  await fake.close();
+}
+
+// Multiplayer: rooms through a local relay (wrangler dev --local, --relay ws://127.0.0.1:8787), the
+// leaderboard and the counters through the stand-in relay in front of it (WebSockets passed through).
+if (want("leavemp")) {
+  const local = /^ws:\/\/(127\.0\.0\.1|localhost):\d+/.test(args.relay || "");
+  console.log("leavemp" + (local ? ` (rooms via ${args.relay}; board + counters via a stand-in relay)` : " — skipped: needs --relay ws://127.0.0.1:8787 (wrangler dev --local)"));
+  if (local) {
+    const fs = await import("node:fs"), path = await import("node:path"), { ROOT, fakeRelay } = await import("./harness.mjs");
+    const gsrc = fs.readFileSync(path.join(ROOT, "game.js"), "utf8"), hook = 'S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;';
+    ok(gsrc.includes(hook), "game.js still has the line the test hooks into");
+    server.overrides.set("/game.js", gsrc.replace(hook, hook + " window.__S = S;"));
+    const fake = await fakeRelay({ wsTarget: new URL(args.relay.replace(/^ws/, "http")).host });
+    const Q = `relay=${encodeURIComponent(fake.url)}`;
+    const evts = (from = 0) => fake.stats().slice(from);
+    const count = (list, e) => list.filter((x) => x.e === e).length;
+    const postsFor = (id) => fake.boardPosts().filter((e) => e && e.id === id);
+    const newRoom = () => Array.from({ length: 5 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[(Math.random() * 31) | 0]).join("");
+    const phaseIs = (pg, ph, ms = 10000) => pg.waitForFunction((ph) => [].concat(ph).includes(window.livboj.debug().phase), ph, { timeout: ms }).then(() => true, () => false);
+    async function host(room, name, team) {
+      const X = await plainPage();
+      await X.page.goto(`${BASE}host.html?room=${room}&${Q}`, { waitUntil: "load" });
+      await X.page.waitForFunction(() => !!document.getElementById("create"));
+      await X.page.fill("#name", name); await X.page.click("#create"); await X.page.waitForFunction(() => !!window.livboj);
+      if (team) await X.page.fill("#team", team);
+      return X;
+    }
+    async function join(room, name) {
+      const X = await plainPage();
+      await X.page.goto(`${BASE}index.html?room=${room}&${Q}`, { waitUntil: "load" });
+      await X.page.waitForFunction(() => !!document.getElementById("join"));
+      await X.page.fill("#name", name); await X.page.click("#join");
+      return X;
+    }
+    // 1) the host leaves with two players left: nothing recorded, a joiner takes over; then the last one leaves
+    let s0 = 0;
+    const room = newRoom();
+    const H = await host(room, "Värden", "Lämnarna");
+    const J1 = await join(room, "Anna"), J2 = await join(room, "Bo");
+    let met = true;
+    try { await H.page.waitForFunction(() => window.livboj.roster().length === 3, null, { timeout: 20000 }); for (const X of [J1, J2]) await X.page.waitForFunction(() => window.livboj.debug().n === 3, null, { timeout: 20000 }); } catch { met = false; }
+    ok(met, `host + two joiners in one lobby (room ${room})`);
+    await sleep(800);
+    let ev = evts(s0);
+    ok(count(ev, "visit") === 3 && count(ev, "join") === 2 && count(ev, "mp_start") === 0, "counters: three visits, a join per joiner", ev.map((x) => x.e).join(","));
+    await H.page.click("#start");
+    ok(await phaseIs(J1.page, "play") && await phaseIs(J2.page, "play"), "the game starts");
+    ev = evts(s0);
+    ok(count(ev, "mp_start") === 1 && ev.find((x) => x.e === "mp_start").n === 3, "one mp_start with n = 3", JSON.stringify(ev.filter((x) => x.e === "mp_start")));
+    const gid = await H.page.evaluate(() => window.livboj.debug().gid);
+    await H.page.evaluate(() => { const S = window.__S; S.score = 600; const pts = [300, 200, 100]; [...S.players.values()].forEach((p, i) => { p.score = pts[i]; p.rescues = pts[i] / 50; }); });
+    await sleep(600);
+    ok((await J1.page.evaluate(() => window.livboj.debug().gid)) === gid, "the joiners know the game's id (snapshot `gid`)", gid);
+    s0 = fake.stats().length;
+    await H.page.close(); // pagehide with two players still in the room
+    let NH = null;
+    try { await Promise.race([J1, J2].map((X) => X.page.waitForFunction(() => window.livboj.debug().authoritative, null, { timeout: 20000 }).then(() => { NH = NH || X; }))); } catch {}
+    ok(!!NH, "host left with players present: a joiner takes over");
+    const other = NH === J1 ? J2 : J1;
+    await sleep(1500);
+    const d1 = NH ? await NH.page.evaluate(() => window.livboj.debug()) : {};
+    ok(d1.phase === "play" && d1.gid === gid && d1.score === 600, "…the game goes on: same game id, same score", `${d1.phase} ${d1.gid} ${d1.score}`);
+    ev = evts(s0);
+    ok(postsFor(gid).length === 0 && !count(ev, "mp_abandoned") && !count(ev, "mp_done"), "…nothing recorded, nothing counted", ev.map((x) => x.e).join(","));
+    await other.page.close(); // a joiner never records
+    await sleep(4500); // > the relay transport's 2.5 s leave grace
+    ok(postsFor(gid).length === 0 && !count(evts(s0), "mp_abandoned"), "the other joiner leaves: still nothing (joiners never record)");
+    ok((await NH.page.evaluate(() => window.livboj.relay().peers.length)) === 0, "…the new host is alone in the room");
+    await NH.page.evaluate(() => { const S = window.__S; S.score += 50; S.players.values().next().value.score += 50; });
+    await NH.page.close(); await sleep(1500); // the last player leaves
+    const p = postsFor(gid), rows = (await fake.rows()).filter((e) => e.id === gid);
+    ev = evts(s0);
+    const e = p[0] || {};
+    ok(p.length === 1 && rows.length === 1 && e.score === 650, "the last player leaves: exactly one row, the score so far", `${p.length} posts, score ${e.score}`);
+    ok(e.team === "Lämnarna" && e.n === 3 && (e.players || []).map((x) => x.name).sort().join(",") === "Anna,Bo,Värden" && (e.players || []).reduce((a, x) => a + x.score, 0) === 650, "…with the team name and all three players' points (also the two who left)", JSON.stringify(e.players));
+    ok(count(ev, "mp_abandoned") === 1 && !count(ev, "mp_done"), "…one mp_abandoned, no mp_done", ev.map((x) => x.e).join(","));
+    // 2) a game the host ends: one row, mp_done, nothing abandoned; then everyone leaves from the end screen
+    s0 = fake.stats().length;
+    const r2 = newRoom(), H2 = await host(r2, "Värd2"), J3 = await join(r2, "Cia");
+    await H2.page.waitForFunction(() => window.livboj.roster().length === 2, null, { timeout: 20000 }).catch(() => {});
+    await H2.page.click("#start"); await phaseIs(J3.page, "play");
+    const gid2 = await H2.page.evaluate(() => window.livboj.debug().gid);
+    await H2.page.evaluate(() => { const S = window.__S; S.score = 90; for (const p of S.players.values()) p.score = 45; window.livboj.quitGame(); });
+    await phaseIs(J3.page, "over"); await sleep(1200);
+    await J3.page.close(); await H2.page.close(); await sleep(1200);
+    ev = evts(s0);
+    ok(postsFor(gid2).length === 1 && postsFor(gid2)[0].score === 90, "host ends the game: one row", `${postsFor(gid2).length} posts`);
+    ok(count(ev, "mp_start") === 1 && ev.find((x) => x.e === "mp_start").n === 2 && count(ev, "mp_done") === 1 && !count(ev, "mp_abandoned"), "…mp_start (n = 2), one mp_done, no mp_abandoned — also after everyone left", ev.map((x) => x.e + (x.n ? x.n : "")).join(","));
+    ok(!H.errors.length && !J1.errors.length && !J2.errors.length && !H2.errors.length && !J3.errors.length, "no console/page errors", [...H.errors, ...J1.errors, ...J2.errors, ...H2.errors, ...J3.errors].join(" | "));
+    for (const X of [H, J1, J2, H2, J3]) await X.context.close().catch(() => {});
+    server.overrides.delete("/game.js");
+    await fake.close();
+  }
 }
 
 // ---------------------------------------------------------------- Nyheter + Förslagslåda

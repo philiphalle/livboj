@@ -210,6 +210,7 @@ export function runIceProbe(iceProbe) {
 // cache and offline fallback. Entries carry a stable id so re-posting (e.g.
 // the one-time upload of an old local list) never duplicates.
 export const RELAY_HTTP = RELAY_URL ? RELAY_URL.replace(/^ws(s?):\/\//, "http$1://").replace(/\/$/, "") : "";
+const isLocalHost = (h) => /^(localhost|127(\.\d+){3}|\[::1\]|::1|0\.0\.0\.0)$/i.test(h || "");
 export function loadBoard() { try { return JSON.parse(localStorage.getItem("livboj-leaderboard") || "[]").map(withEntryId); } catch { return []; } }
 export function saveBoardLS(b) { try { localStorage.setItem("livboj-leaderboard", JSON.stringify(b.slice(0, 50))); } catch {} }
 export function withEntryId(e) { return e.id ? e : { ...e, id: `${e.ts}-${e.score}-${e.level}-${(e.players || []).map((p) => (typeof p === "string" ? p : p.name)).join("+")}`.slice(0, 48) }; }
@@ -228,23 +229,34 @@ export async function postGlobalBoard(entries) {
 // it only once the relay has taken it (or refused it with a 4xx), so a result
 // survives a dead network, a closed tab or a crash. Flushed when a game ends,
 // on every page load and when the browser comes back online. The relay dedupes
-// by entry id, so a re-sent entry can never appear twice.
+// by entry id, so a re-sent entry can never appear twice (and of two copies of
+// one game — left mid-game, then finished after all — the further one stays).
 const QUEUE_KEY = "livboj-board-queue";
 const loadQueue = () => { try { const q = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); return Array.isArray(q) ? q : []; } catch { return []; } };
 const saveQueue = (q) => { try { if (q.length) localStorage.setItem(QUEUE_KEY, JSON.stringify(q.slice(-100))); else localStorage.removeItem(QUEUE_KEY); } catch {} };
-export function queueResult(entry) { if (!RELAY_HTTP) return; const q = loadQueue(); if (!q.some((e) => e.id === entry.id)) { q.push(entry); saveQueue(q); } }
+// One game, two copies (the score when it was left, then the final one): the copy that got further
+// wins, here as on the relay (relay/src/index.js `further`). Older ids never have two different copies.
+export const further = (a, b) => (a.score - b.score) || ((a.level || 0) - (b.level || 0)) || ((a.duration || 0) - (b.duration || 0));
+export function queueResult(entry) {
+  if (!RELAY_HTTP) return;
+  const q = loadQueue(), i = q.findIndex((e) => e.id === entry.id);
+  if (i < 0) q.push(entry); else if (further(entry, q[i]) > 0) q[i] = entry; else return;
+  saveQueue(q);
+}
 let flushing = null;
-// -> the merged global list after a successful post, else null (the queue keeps what was not taken)
-export function flushBoardQueue() {
+// -> the merged global list after a successful post, else null (the queue keeps what was not taken).
+// `now`: the page is going away — post at once (keepalive) even while another post is in flight.
+export function flushBoardQueue(now) {
   if (!RELAY_HTTP) return Promise.resolve(null);
-  if (flushing) return flushing.then((m) => (loadQueue().length ? flushBoardQueue() : m)); // a result queued mid-flight goes next
+  if (flushing && !now) return flushing.then((m) => (loadQueue().length ? flushBoardQueue() : m)); // a result queued mid-flight goes next
   const batch = loadQueue().slice(0, 50);
   if (!batch.length) return Promise.resolve(null);
   flushing = (async () => {
     for (let k = 0; k < 2; k++) {
       if (k) await new Promise((r) => setTimeout(r, 2000)); // one retry, shortly after
       let r;
-      try { r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entries: batch }), keepalive: true }); } catch { continue; } // offline: retry once
+      // (leaving: sent as text/plain — no preflight, which a closing page may not live to finish; the relay reads JSON either way)
+      try { r = await fetch(`${RELAY_HTTP}/board`, { method: "POST", headers: now ? {} : { "content-type": "application/json" }, body: JSON.stringify({ entries: batch }), keepalive: true }); } catch { continue; } // offline: retry once
       const sent = new Set(batch.map((e) => e.id));
       if (r.status >= 400 && r.status < 500) { saveQueue(loadQueue().filter((e) => !sent.has(e.id))); return null; } // refused: drop, no retry loop
       if (!r.ok) continue;
@@ -268,6 +280,95 @@ export async function postForslag(text, name) {
     return d && d.ok ? "ok" : "error";
   } catch { return "error"; } finally { clearTimeout(t); }
 }
-// whatever an earlier page load could not deliver
-flushBoardQueue();
+
+// ---- Unfinished games ------------------------------------------------------
+// A game whose last player leaves mid-game still goes on the leaderboard with the score so far (a
+// row like any other), and counts as "abandoned" (/stat). game.js decides when this page would be
+// the one to record it; here is the storage. Phones often kill a background tab without any unload
+// event, so the result is written down as soon as the page is hidden ("pending", localStorage) and
+// dropped again if the page comes back. Whatever is still pending on the next load of any game page
+// on this device — its page is gone — is moved to the outbox and counted then.
+//
+// A page with a game in progress holds the Web Lock "livboj-game-<id>" (released by the browser when
+// the page is closed, killed or discarded): a pending game whose lock is still held belongs to a
+// living page (another tab in the background, a frozen tab) and is left alone.
+const PENDING_KEY = "livboj-pending";
+const loadPending = () => { try { const p = JSON.parse(localStorage.getItem(PENDING_KEY) || "{}"); return p && typeof p === "object" && !Array.isArray(p) ? p : {}; } catch { return {}; } };
+const savePending = (p) => { try { if (Object.keys(p).length) localStorage.setItem(PENDING_KEY, JSON.stringify(p)); else localStorage.removeItem(PENDING_KEY); } catch {} };
+// A game's id: stable for the whole game (also across a host change: the snapshot carries it), so
+// every copy of its result has the same entry id. "g" + start time + random, base 36.
+export const newGameId = () => `g${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+export const isGameId = (s) => typeof s === "string" && /^g[0-9a-z]{4,12}-[0-9a-z]{4,12}$/.test(s);
+// p = { kind: "solo" | "mp", entry: the result so far or null (score 0: counted, not listed), c: 1 = already counted }
+export function putPending(id, p) { const all = loadPending(); all[id] = { ...p, at: Date.now() }; savePending(all); }
+// -> whether it was still there (false: another page already took it, and counted it)
+export function dropPending(id) { const all = loadPending(); if (!all[id]) return false; delete all[id]; savePending(all); return true; }
+// The page is going away for good (pagehide, not into the bfcache): post it now (keepalive), count it.
+// It also stays in the outbox until a later load sees it taken (the relay dedupes by id).
+export function leavePending(id) {
+  const all = loadPending(), p = all[id];
+  if (!p) return false;
+  delete all[id]; savePending(all);
+  if (p.entry) { queueResult(p.entry); if (UNLOAD_SEND) flushBoardQueue(true); }
+  if (!p.c) sendStat(p.kind === "mp" ? "mp_abandoned" : "solo_abandoned");
+  return true;
+}
+// A request sent while the page unloads escapes Playwright's request stubs (it reaches the real
+// network), and the tools close pages mid-game: in an automated browser the result therefore waits in
+// the outbox for the next load (a normal, stubbed request) — unless the relay is a local one.
+const UNLOAD_SEND = (() => { try { return !!RELAY_HTTP && (isLocalHost(new URL(RELAY_HTTP).hostname) || !navigator.webdriver); } catch { return false; } })();
+const lockName = (id) => `livboj-game-${id}`;
+let held = null;
+export function holdGame(id) {
+  if (held && held.id === id) return;
+  releaseGame();
+  try {
+    if (!navigator.locks) return;
+    let release; const until = new Promise((r) => { release = r; });
+    held = { id, release };
+    navigator.locks.request(lockName(id), () => until).catch(() => {});
+  } catch {}
+}
+export function releaseGame() { if (held) { held.release(); held = null; } }
+// On load: every pending game whose page is gone -> the outbox (+ its abandoned count). One page at a
+// time (the "livboj-adopt" lock): two tabs opening together can't both take and count the same game.
+async function adoptPending() {
+  if (!Object.keys(loadPending()).length) return;
+  const alive = async (id) => { try { return navigator.locks ? await navigator.locks.request(lockName(id), { ifAvailable: true }, (l) => !l) : false; } catch { return false; } };
+  const take = async () => {
+    for (const id of Object.keys(loadPending())) {
+      if (await alive(id)) continue;
+      const all = loadPending(), p = all[id];
+      if (!p) continue;
+      delete all[id]; savePending(all);
+      if (p.entry && typeof p.entry === "object") queueResult(p.entry);
+      if (!p.c) sendStat(p.kind === "mp" ? "mp_abandoned" : "solo_abandoned");
+    }
+  };
+  try { if (navigator.locks) await navigator.locks.request("livboj-adopt", take); else await take(); } catch {}
+}
+
+// ---- Anonymous daily counters (relay /stat) ----------------------------------
+// Fire-and-forget, one request per event (visit, a game started / done / abandoned, a join): never
+// waited for, never retried, no cookies or ids — the body is just { e, n? }. Silent in automated
+// browsers (navigator.webdriver) and on a page served from localhost / 127.0.0.1, unless the relay in
+// use is itself local (wrangler dev): then it counts there, so local end-to-end tests work.
+export const STAT_ON = (() => {
+  try {
+    if (!RELAY_HTTP) return false;
+    if (isLocalHost(new URL(RELAY_HTTP).hostname)) return true;
+    return !navigator.webdriver && !isLocalHost(location.hostname);
+  } catch { return false; }
+})();
+export function sendStat(e, n) {
+  if (!STAT_ON) return;
+  try {
+    const body = JSON.stringify(n ? { e, n } : { e }), u = `${RELAY_HTTP}/stat`;
+    // a string body is text/plain: a "simple" request, no preflight; keepalive outlives a closing page
+    fetch(u, { method: "POST", body, keepalive: true, mode: "no-cors", credentials: "omit", cache: "no-store" }).catch(() => {});
+  } catch { try { navigator.sendBeacon && navigator.sendBeacon(`${RELAY_HTTP}/stat`, JSON.stringify(n ? { e, n } : { e })); } catch {} }
+}
+
+// whatever an earlier page load could not deliver (and games left on this device: their page is gone)
+adoptPending().finally(() => flushBoardQueue());
 addEventListener("online", () => { flushBoardQueue(); });

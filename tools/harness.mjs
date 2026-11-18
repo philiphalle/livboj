@@ -67,13 +67,21 @@ export async function launch(opts = {}) {
 }
 
 /**
- * Never let a test touch the real leaderboard: every request to …/board (and
- * …/forslag) is answered here. `onPost(body, route)` may answer a POST itself
- * (return true); otherwise a POST gets a fake 200 that echoes the entries.
- * -> { posts: [parsed bodies], gets: n }
+ * Never let a test touch the real leaderboard or counters: every request to …/board
+ * and …/stat is answered here (…/forslag: by the tests that use it). `onPost(body, route)`
+ * may answer a /board POST itself (return true); otherwise a POST gets a fake 200 that
+ * echoes the entries. Every /stat POST gets { ok: true } and is logged (the game sends
+ * them only with a local relay: net.js STAT_ON; this stub is there in case).
+ * -> { posts: [parsed bodies], gets: n, stats: [parsed /stat bodies] }
  */
 export async function stubBoard(context, { onPost, entries = [] } = {}) {
-  const log = { posts: [], gets: 0, forslag: [] };
+  const log = { posts: [], gets: 0, forslag: [], stats: [] };
+  await context.route(/\/stat(\?|$)/, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+    if (req.method() === "POST") { let body = null; try { body = JSON.parse(req.postData() || "null"); } catch {} log.stats.push(body); }
+    return route.fulfill({ status: 200, headers: { ...cors, "content-type": "application/json" }, body: '{"ok":true}' });
+  });
   await context.route(/\/board(\?|$)/, async (route) => {
     const req = route.request();
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
@@ -90,3 +98,59 @@ export async function stubBoard(context, { onPost, entries = [] } = {}) {
   return log;
 }
 const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type", "access-control-allow-methods": "GET, POST, DELETE, OPTIONS" };
+
+/**
+ * A stand-in relay on 127.0.0.1 for tests that must see requests a page sends while it
+ * unloads (those escape context.route: they reach the network): /board, /forslag and
+ * /stat run the relay's own Board class (relay/src/index.js) on in-memory storage, and
+ * every request is logged. With `wsTarget` ("127.0.0.1:8787": wrangler dev --local) a
+ * room WebSocket is passed through to that relay. Never a live relay.
+ * -> { url: "ws://127.0.0.1:<port>", log: [{ method, path, body }], rows(), stats(), close() }
+ */
+export async function fakeRelay({ wsTarget, adminKey = "fake-admin-key" } = {}) {
+  const net = await import("node:net");
+  const { Board } = await import("../relay/src/index.js");
+  const mem = new Map(), clone = (v) => (v === undefined ? v : structuredClone(v));
+  const storage = {
+    async get(k) { return clone(mem.get(k)); },
+    async put(k, v) { mem.set(k, clone(v)); },
+    async delete(k) { for (const x of [].concat(k)) mem.delete(x); },
+    async list({ prefix = "", reverse = false, limit = Infinity, end } = {}) {
+      let ks = [...mem.keys()].filter((k) => k.startsWith(prefix) && (end === undefined || k < end)).sort();
+      if (reverse) ks.reverse();
+      return new Map(ks.slice(0, limit).map((k) => [k, clone(mem.get(k))]));
+    },
+  };
+  const board = new Board({ storage }, { ADMIN_KEY: adminKey });
+  const log = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks).toString("utf8"), path = new URL(req.url, "http://x").pathname;
+    if (req.method === "OPTIONS") { res.writeHead(204, cors); res.end(); return; }
+    log.push({ method: req.method, path, url: req.url, body, type: req.headers["content-type"] || "" });
+    if (!["/board", "/forslag", "/stat"].includes(path)) { res.writeHead(200, { ...cors, "content-type": "text/plain" }); res.end("livboj relay ok"); return; }
+    const r = await board.fetch(new Request(`http://fake${req.url}`, { method: req.method, headers: { "content-type": req.headers["content-type"] || "text/plain", "cf-connecting-ip": `10.9.${log.length >> 8 & 255}.${log.length & 255}` /* one address per request: no throttling in tests */ }, body: req.method === "GET" || req.method === "HEAD" ? undefined : body }));
+    res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
+  });
+  if (wsTarget) server.on("upgrade", (req, sock, head) => {
+    const [host, port] = wsTarget.split(":");
+    const up = net.connect(+port, host, () => {
+      let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
+      for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${/^host$/i.test(req.rawHeaders[i]) ? wsTarget : req.rawHeaders[i + 1]}\r\n`;
+      up.write(raw + "\r\n"); if (head && head.length) up.write(head);
+      sock.pipe(up); up.pipe(sock);
+    });
+    const end = () => { try { sock.destroy(); } catch {} try { up.destroy(); } catch {} };
+    up.on("error", end); sock.on("error", end); up.on("close", end); sock.on("close", end);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const posted = (p) => log.filter((x) => x.method === "POST" && x.path === p).map((x) => { try { return JSON.parse(x.body); } catch { return null; } });
+  return {
+    url: `ws://127.0.0.1:${port}`, http: `http://127.0.0.1:${port}`, log, adminKey,
+    rows: async () => (await storage.get("entries")) || [],                                   // the stored leaderboard (after the relay's merge)
+    boardPosts: () => posted("/board").flatMap((b) => (b && Array.isArray(b.entries) ? b.entries : b ? [b] : [])), // every entry ever posted
+    stats: () => posted("/stat").filter(Boolean),                                             // every counter event ([{ e, n? }])
+    close: () => new Promise((r) => { server.closeAllConnections && server.closeAllConnections(); server.close(r); }),
+  };
+}

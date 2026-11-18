@@ -13,9 +13,13 @@ const V = new URL(import.meta.url).search;
 const [sim, net, { createRenderer }] = await Promise.all([import(`./sim.js${V}`), import(`./net.js${V}`), import(`./render.js${V}`)]);
 const { Phase, BASE_LEVELS, shoreH, EAT_DWELL, shoreY, levelParams, inSwamp, circleHitsRect, whirlPull, SWAMP_SLOW, WHIRL_PLAYER, createSim } = sim;
 const { RELAY_URL, SIG_PARAM, RTC, APP_ID, SIGNAL, getRelaySockets, pickSignaling, relayJoin, runIceProbe,
-  loadBoard, saveBoardLS, withEntryId, sortBoard, postGlobalBoard, queueResult, flushBoardQueue } = net;
+  loadBoard, saveBoardLS, withEntryId, sortBoard, postGlobalBoard, queueResult, flushBoardQueue,
+  further, newGameId, isGameId, putPending, dropPending, leavePending, holdGame, releaseGame, sendStat } = net;
 // what boot.js hands the pages (besides createGame and initChrome)
 export const { fetchGlobalBoard, fetchGlobalBoardFull, postForslag } = net;
+// Anonymous daily counter (net.js sendStat): one "visit" per load of index.html / host.html (both
+// load this module once). Not for the update watcher's own reload (boot.js marks it in sessionStorage).
+try { if (sessionStorage.getItem("livboj-update-reload")) sessionStorage.removeItem("livboj-update-reload"); else sendStat("visit"); } catch { sendStat("visit"); }
 let selfId = net.initialSelfId; // re-pointed to the chosen strategy's id before any use
 const BOARD_SHOW = 10;
 // ---- Network rates. The relay runs on Cloudflare's free plan, where every message a client sends
@@ -259,7 +263,7 @@ export function createGame(canvas, opts) {
       sound: (k) => SOUNDS[k](),
       phase: () => emitPhase(),
       push: () => pushState(),
-      result: () => recordResult(),
+      result: () => endGame(),
       rescued: (s) => spawnSaved(s.x, s.y, s.sk, s.hr, s.id),
       levelStarted: () => { saved = []; levelStartScore = new Map([...S.players.values()].map((p) => [p.id, p.score || 0])); },
     },
@@ -269,7 +273,19 @@ export function createGame(canvas, opts) {
   let jLastSec = 999; // countdown-tick tracker (joiners)
   // Per-game stats for the leaderboard: time played (the rest is in the sim).
   let gameStartAt = 0;
-  function beginGame() { gameStartAt = performance.now(); S.beginGame(); }
+  // The game in progress on this page (solo, host, promoted host), for its leaderboard row and the
+  // anonymous counters: { id (the entry id of its result, the same on every copy), kind: "solo" | "mp",
+  // ended (its result was recorded or it was counted as left: never again), pend (this page wrote it
+  // down as pending: hidden or leaving), counted (another page already counted it as abandoned) }.
+  let game = null;
+  const departed = new Map(); // players who left mid-game: their points stay in the result (id -> { name, score, rescues })
+  function beginGame() {
+    gameStartAt = performance.now(); S.beginGame();
+    if (game && game.pend) dropPending(game.id);
+    game = { id: newGameId(), kind: mode === "solo" ? "solo" : "mp", ended: false, pend: false, counted: false };
+    departed.clear(); holdGame(game.id);
+    if (mode === "solo") sendStat("solo_start"); else sendStat("mp_start", S.players.size);
+  }
   let board = loadBoard(); // leaderboard (global when the relay answers, else the local cache)
   let boardSource = "local"; // "global" once the relay has answered
   let netBoard = []; // leaderboard received from the host (joiners)
@@ -341,11 +357,16 @@ export function createGame(canvas, opts) {
     A.inp = room.makeAction("inp");
     A.hi = room.makeAction("hi");
     room.onPeerJoin((peer) => {
-      if (authoritative) { addPlayer(peer, "Spelare"); sJoin(); emitRoster(); pushState(); }
+      if (authoritative) { addPlayer(peer, "Spelare"); sJoin(); emitRoster(); pushState(); if (document.hidden) writePending(); }
       else if (sendHello) sendHello({ name: myName });
     });
     room.onPeerLeave((peer) => {
-      if (authoritative) { S.players.delete(peer); peerIn.delete(peer); emitRoster(); pushState(); }
+      if (authoritative) {
+        const p = S.players.get(peer);
+        if (p && game && !game.ended && S.phase !== Phase.LOBBY) departed.set(peer, { name: p.name || "Spelare", score: p.score || 0, rescues: p.rescues || 0 });
+        S.players.delete(peer); peerIn.delete(peer); emitRoster(); pushState();
+        if (document.hidden) writePending(); // the last other player left while this page is in the background
+      }
       else if (lastView && peer === lastView.hostId) electHost();
     });
     if (asHost) wireHost(); else wireJoin();
@@ -480,20 +501,75 @@ export function createGame(canvas, opts) {
     if (!merged) return; // relay unreachable: keep showing the local cache
     adoptBoard(merged, "global");
   }
+  // The leaderboard row for the game as it stands now: at its end, or so far when it is left mid-game
+  // (the same fields either way — a left game looks like any other row).
+  function resultEntry() {
+    const live = [...S.players.values()].map((p) => ({ id: p.id, name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 }));
+    const gone = [...departed].filter(([id]) => !S.players.has(id)).map(([, p]) => p);
+    const players = [...live, ...gone].map(({ name, score, rescues }) => ({ name, score, rescues })).sort((a, b) => b.score - a.score).slice(0, 12);
+    return withEntryId({
+      ...(game ? { id: game.id } : {}),
+      score: S.score, level: S.levelIndex + 1, won: S.phase === Phase.WIN, n: Math.max(1, players.length), ts: Date.now(), team,
+      duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: S.totalCaught, combo: S.bestCombo,
+      // team total in `score`; per-player breakdown here (everyone who played, also who left), best first.
+      players,
+    });
+  }
   function recordResult() {
     if (S.score <= 0) return; // nothing rescued: not a result worth listing
-    const entry = withEntryId({
-      score: S.score, level: S.levelIndex + 1, won: S.phase === Phase.WIN, n: S.players.size, ts: Date.now(), team,
-      duration: Math.max(1, Math.round((performance.now() - gameStartAt) / 1000)), rescued: S.totalCaught, combo: S.bestCombo,
-      // team total in `score`; per-player breakdown here, best first.
-      players: [...S.players.values()].map((p) => ({ name: (p.id === selfId ? myName : p.name) || "Spelare", score: p.score || 0, rescues: p.rescues || 0 })).sort((a, b) => b.score - a.score),
-    });
-    board.push(entry); sortBoard(board); board = board.slice(0, 50);
+    const entry = resultEntry();
+    const i = board.findIndex((e) => e.id === entry.id);
+    if (i < 0) board.push(entry); else if (further(entry, board[i]) > 0) board[i] = entry;
+    sortBoard(board); board = board.slice(0, 50);
     saveBoardLS(board); emitBoard();
     // solo, host and a promoted host all post; joiners never do. Queued first,
     // so a failed post is retried on the next page load / when back online.
     if (authoritative) { queueResult(entry); flushBoardQueue().then((merged) => { if (merged) adoptBoard(merged, "global"); }); }
   }
+  // The game reached its end (game over, all levels, the host's "Avsluta spelet"): its result, and
+  // "done" in the counters — once, and not if it was already counted as left (another page took the
+  // pending copy while this one was in the background; the final row still replaces that copy).
+  function endGame() {
+    recordResult();
+    if (!game || game.ended) return;
+    game.ended = true;
+    if (game.pend && !dropPending(game.id)) game.counted = true;
+    game.pend = false;
+    releaseGame();
+    if (!game.counted) sendStat(game.kind === "solo" ? "solo_done" : "mp_done");
+  }
+
+  // ---- Leaving mid-game ----------------------------------------------------
+  // Would this page record the game if it went away now? Solo: yes. Hosted: only the authoritative
+  // host (also a promoted one) with nobody else left in the room — with players left, one of them
+  // takes over and the game goes on. Only a game in progress (intro, play, level board).
+  function recorderNow() {
+    if (!authoritative || !game || game.ended) return false;
+    if (S.phase !== Phase.INTRO && S.phase !== Phase.PLAY && S.phase !== Phase.CLEARED) return false;
+    if (game.kind === "solo") return true;
+    return !(room && room.getPeers && Object.keys(room.getPeers()).length > 0);
+  }
+  // Hidden or leaving: write down (or update) the result so far — or take back what this page wrote
+  // if it is no longer the one to record (a player joined meanwhile).
+  function writePending() {
+    if (recorderNow()) { putPending(game.id, { kind: game.kind, entry: S.score > 0 ? resultEntry() : null, ...(game.counted ? { c: 1 } : {}) }); game.pend = true; }
+    else if (game && game.pend) { dropPending(game.id); game.pend = false; }
+  }
+  // Back (visible again, or restored from the bfcache): the game goes on, the pending copy goes. If it
+  // is gone already, another page took it and counted the game as abandoned: no "done" for it later.
+  function backAgain() {
+    if (!game || !game.pend) return;
+    game.pend = false;
+    if (!dropPending(game.id)) game.counted = true;
+    if (!game.ended) holdGame(game.id);
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) writePending(); else backAgain(); });
+  addEventListener("pagehide", (e) => {
+    writePending();
+    // gone for good (closed, reloaded, navigated away without the bfcache): post it now and count it
+    if (!e.persisted && game && game.pend) { game.pend = false; game.ended = true; leavePending(game.id); }
+  });
+  addEventListener("pageshow", (e) => { if (e.persisted) backAgain(); });
   function clearBoard() { board = []; boardSource = "local"; saveBoardLS(board); emitBoard(); if (authoritative && room) pushState(); } // local cache only
 
   // A rescued swimmer heads for the beach and cheers once it arrives. Purely
@@ -525,6 +601,7 @@ export function createGame(canvas, opts) {
     beginGame(); startLevel(0); S.phase = Phase.INTRO; S.introTimer = 2.4; emitPhase(); pushState();
   }
   function toLobby() {
+    releaseGame();
     S.levelIndex = 0; S.score = 0;
     for (const p of S.players.values()) { p.rescues = 0; p.score = 0; }
     S.phase = Phase.LOBBY; emitPhase(); emitRoster(); emitBoard(); pushState();
@@ -591,7 +668,8 @@ export function createGame(canvas, opts) {
   // run an older or newer build for a few minutes after a deploy): keep it as is.
   // Only ever ADD optional fields (an old joiner ignores them; a new joiner must
   // cope with an old host that lacks them): `team` (2026-11) is the team's name,
-  // left out when there is none.
+  // left out when there is none; `gid` (2026-11) the game's id (its leaderboard entry id) and `gt`
+  // the seconds played so far, while a game is on — a promoted host goes on with the same game.
   function pushState() {
     if (!sendState) return;
     const L = levelParams(S.levelIndex, Math.max(1, S.players.size));
@@ -608,12 +686,15 @@ export function createGame(canvas, opts) {
       // joiners only ever see team games, so send the top team entries (not solo runs)
       board: (S.phase === Phase.LOBBY || S.phase === Phase.OVER || S.phase === Phase.WIN) ? board.filter((e) => e.n >= 2).slice(0, BOARD_SHOW) : undefined,
       team: team || undefined, // optional: the team's name (none: left out)
+      gid: game && !game.ended ? game.id : undefined, // optional: this game's id (none: no game on)
+      gt: game && !game.ended ? Math.round((performance.now() - gameStartAt) / 1000) : undefined,
     };
     S.fxOut = [];
     lastPushAt = performance.now();
     try { sendState(snap); } catch {}
   }
 
+  let joinCounted = false;
   function applyState(d) {
     if (!d) return;
     lastStateTime = performance.now(); electing = false;
@@ -625,7 +706,9 @@ export function createGame(canvas, opts) {
       swamps: (d.swamps || []).map((z) => ({ x: z[0], y: z[1], w: z[2], h: z[3] })),
       whirls: (d.whirls || []).map((z) => ({ x: z[0], y: z[1], r: z[2] })),
       team: cleanTeam(d.team), // "" from a host without a name, or from an older host build
+      gid: isGameId(d.gid) ? d.gid : "", gt: Number.isFinite(d.gt) ? Math.max(0, Math.min(86_400, d.gt)) : 0, // (an older host: none)
     };
+    if (!prevPhase && !joinCounted) { joinCounted = true; sendStat("join"); } // the first snapshot: this player is in the room
     if (d.board) netBoard = d.board;
     lastView.board = netBoard;
     const seen = new Set();
@@ -677,6 +760,13 @@ export function createGame(canvas, opts) {
     authoritative = true; promoted = true; hostId = selfId;
     const v = lastView;
     team = v.team || ""; // the team keeps its name: the result this host records (and its snapshots) carry it
+    // the same game goes on: its id (the result's entry id) and time played; the old host's points stay in the result
+    const inGame = v.phase === Phase.INTRO || v.phase === Phase.PLAY || v.phase === Phase.CLEARED;
+    game = v.phase === Phase.LOBBY ? null : { id: v.gid || newGameId(), kind: "mp", ended: !inGame, pend: false, counted: false };
+    if (inGame) {
+      gameStartAt = performance.now() - v.gt * 1000; holdGame(game.id);
+      const old = iPlayer.get(v.hostId); if (old) departed.set(v.hostId, { name: old.name || "Spelare", score: old.score || 0, rescues: old.rescues || 0 });
+    }
     S.world = v.world; S.obstacles = v.obstacles.map((o) => ({ ...o })); S.swamps = (v.swamps || []).map((z) => ({ ...z })); S.whirls = (v.whirls || []).map((z) => ({ ...z }));
     S.levelIndex = v.levelIndex; S.score = v.score; S.caught = v.caught; S.missed = v.missed; S.timeLeft = v.timeLeft; S.phase = v.phase;
     const L = levelParams(S.levelIndex, Math.max(1, iPlayer.size));
@@ -768,7 +858,7 @@ export function createGame(canvas, opts) {
   function quitGame() {
     if (!authoritative) return;
     if (S.phase !== Phase.PLAY && S.phase !== Phase.INTRO && S.phase !== Phase.CLEARED) return;
-    S.phase = Phase.OVER; recordResult(); sOver(); emitPhase(); pushState();
+    S.phase = Phase.OVER; endGame(); sOver(); emitPhase(); pushState();
   }
   function inQuit(cx, cy) { const b = QUIT_BTN; return authoritative && cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h; }
   function pressQuit() { const now = performance.now(); if (quitArmedUntil > now) { quitArmedUntil = 0; quitGame(); } else quitArmedUntil = now + 3000; }
@@ -810,10 +900,11 @@ export function createGame(canvas, opts) {
     _jump: (idx) => { if (authoritative) { S.levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(S.levelIndex); S.phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted, team: authoritative ? team : (lastView ? lastView.team : ""),
+      game: game ? { ...game } : null, gid: authoritative ? (game ? game.id : "") : (lastView ? lastView.gid : ""), // the game in progress (leaderboard id, left/ended flags)
       phase: authoritative ? S.phase : (lastView && lastView.phase),
       timeLeft: Math.round(authoritative ? S.timeLeft : (lastView ? lastView.timeLeft : -1)),
       n: authoritative ? S.players.size : iPlayer.size, hasState: !!lastView,
-      caught: authoritative ? S.caught : (lastView ? lastView.caught : 0),
+      caught: authoritative ? S.caught : (lastView ? lastView.caught : 0), score: authoritative ? S.score : (lastView ? lastView.score : 0),
       level: authoritative ? S.levelIndex : (lastView ? lastView.levelIndex : 0),
       monsters: authoritative ? S.monsters.length : iMonster.size,
       rescues: [...(authoritative ? S.players.values() : iPlayer.values())].map((p) => ({ you: p.id === selfId, r: p.rescues || 0 })),

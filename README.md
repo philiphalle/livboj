@@ -19,7 +19,7 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | `water.js` | The water: a WebGL layer under the game canvas (one fragment shader: depth, caustics, waves, shadows, foam, wakes, the whirlpool) with a 2D fallback of the same look. Steps down in quality when frames are slow; `?water=2d`, `?water=gl` or `?water=low` forces a mode. |
 | `hud.js` | The canvas UI on top: HUD, on-canvas buttons (mute, *Spurt*, *Avsluta spelet*, the screens' buttons), the intro / level / end / lobby screens, vector icons. Scales up on small canvases (phones); the fullscreen button's CSS repeats its formula. A HUD piece with a swimmer, monster or ring under it turns see-through (and a swimmer's sink gauge is drawn above it), so the HUD never hides what you must reach. |
 | `fonts/` | Fredoka (SIL OFL 1.1, `OFL.txt`), the UI's display face, self-hosted and loaded without blocking (the system font draws until it has arrived). A changed font file gets a new name: it is not fingerprinted by `boot.js`. |
-| `net.js` | The room transports (WebSocket relay, Trystero P2P fallback) and the relay's HTTP endpoints (leaderboard + its localStorage outbox, Förslagslåda). |
+| `net.js` | The room transports (WebSocket relay, Trystero P2P fallback) and the relay's HTTP endpoints (leaderboard + its localStorage outbox and unfinished games, Förslagslåda, the anonymous counters). |
 | `boot.js` | Fingerprints every module, loads `game.js?v=<build>` and watches for new builds (see *Deploy*). |
 | `nyheter.json` | The news shown on the start page (see *Nyheter* below). |
 | `manifest.webmanifest`, `icons/`, `favicon.svg` | Add-to-home-screen / install (fullscreen on phones). No service worker. |
@@ -93,6 +93,35 @@ localStorage queue first and leaves it only once the relay has taken it, so a re
 dead network: the queue is retried on the next page load and when the browser comes back online.
 The relay dedupes by entry id, so a re-sent result never shows twice.
 
+**Unfinished games.** A game whose last player leaves mid-game (intro, play or the level board) is
+listed too, with the score so far — a row like any other (same fields, no mark); a game at 0 points is
+not. Who records it: solo, the player; hosted, only the authoritative host (also a promoted one) with
+nobody else left in the room — with players left, one of them takes over and the game goes on.
+Every game has an id (`game.js` `game.id`, `g<time>-<random>`, carried to the joiners in the snapshot's
+`gid`), which is its result's entry id, so every copy of one game is one row. How leaving is caught
+(`game.js` "Leaving mid-game", `net.js` "Unfinished games"):
+
+- page hidden (`visibilitychange`) or `pagehide`: the result so far is written to localStorage
+  (`livboj-pending`); visible again or back from the bfcache: dropped, the game goes on;
+- `pagehide` that is not into the bfcache (tab closed, reload, navigation): moved to the outbox and
+  posted at once (keepalive), and counted as abandoned;
+- a phone that kills the background tab without any event: the next load of any game page on that
+  device finds it, posts it and counts it. A page holds the Web Lock `livboj-game-<id>` while its game
+  runs, so another tab never takes the pending game of a page that is still alive.
+
+If a copy was posted and the game still went on (it came back after all), the final result replaces
+it: for these ids the relay keeps the copy that got further (`relay/README.md`).
+
+**Anonymous counters.** `net.js` `sendStat` posts one tiny event to the relay's `/stat` (a visit, a
+game started / finished / left, a join; `relay/README.md` has the list and how to read them). No
+cookies, no ids, never waited for or retried. It is silent in automated browsers
+(`navigator.webdriver`) and on a page served from localhost / 127.0.0.1 — unless the relay in use is
+local (`?relay=ws://127.0.0.1:8787`), so local end-to-end tests see them. The tools stub `/stat` like
+`/board` (`tools/harness.mjs` `stubBoard`). Note: requests a page sends while it unloads get past
+Playwright's stubs, so in an automated browser with a non-local relay the leaving post waits in the
+outbox for the next load instead (`net.js` `UNLOAD_SEND`); `smoke.mjs --only leave` uses a stand-in
+relay on 127.0.0.1 (`harness.mjs` `fakeRelay`, the relay's own Board code) to see those requests.
+
 ## Nyheter and the Förslagslåda
 
 The start page shows the latest five items of `nyheter.json` (fetched uncached, so a push shows
@@ -131,9 +160,10 @@ The relay is deployed separately with `npx wrangler deploy` in `relay/` (see `re
 node tools/sim-test.mjs           # the rules and layouts (sim.js) in plain node: no install, no browser, ~3 s
 node tools/bot.mjs --strategy near --sim /tmp/old-sim.js   # difficulty: a bot plays every level (compare two sim.js)
 npm install                       # once: Playwright for the tools below (or it is found in the npx cache)
-node tools/smoke.mjs              # layout, fullscreen, water layer, HUD see-through, every button by click/tap, input, leaderboard queue, cache busting (leaderboard always stubbed)
+node tools/smoke.mjs              # layout, fullscreen, water layer, HUD see-through, every button by click/tap, input, leaderboard queue, unfinished solo games + counters, cache busting (leaderboard always stubbed)
 node tools/smoke.mjs --live       # + host/join, forced reconnects and the team name (incl. old/new builds mixed) through the live relay
 node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
+node tools/smoke.mjs --only leavemp --relay ws://127.0.0.1:8787        # a hosted game left mid-game / ended: rows + counters (needs a local relay)
 node tools/relay-check.mjs --relay ws://127.0.0.1:8787                 # the relay's `to` (directed delivery), plain WebSockets
 node tools/load.mjs --relay ws://127.0.0.1:8787 --minutes 3            # 8 bots in one room: msgs/s per client and for the room, quota hours/day, sanity
 node tools/load.mjs --relay ws://127.0.0.1:8787 --kill-host-at 60      # …and the host closes mid-game: a joiner takes over

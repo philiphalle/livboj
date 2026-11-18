@@ -17,13 +17,17 @@
 //
 // Leaderboard:
 //   GET  /board                      -> { entries: [top 50] }
-//   POST /board  { entries: [...] }  -> merges (dedupe by id), returns { entries }
+//   POST /board  { entries: [...] }  -> merges (dedupe by id; a per-game id keeps the further copy), returns { entries }
 //   DELETE /board?key=<ADMIN_KEY>    -> wipes it (only if the ADMIN_KEY secret is set)
 //
 // Förslagslåda (suggestion box, kept in the same Board object under its own key):
 //   POST   /forslag  { text, name? }            -> { ok: true }   (never returns suggestions)
 //   GET    /forslag?key=<ADMIN_KEY>             -> { items: [newest first] }
 //   DELETE /forslag?key=<ADMIN_KEY>[&id=<id>]   -> removes one, or all
+//
+// Anonymous daily counters (same Board object, one storage key per day, "stat:YYYY-MM-DD"):
+//   POST /stat  { e: "<event>", n?: <players> }  -> { ok: true }   (any content type: a sendBeacon works)
+//   GET  /stat?key=<ADMIN_KEY>[&days=30]         -> { days: [newest first] }
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -37,7 +41,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    if (url.pathname === "/board" || url.pathname === "/forslag") return env.BOARD.get(env.BOARD.idFromName("global")).fetch(request);
+    if (url.pathname === "/board" || url.pathname === "/forslag" || url.pathname === "/stat") return env.BOARD.get(env.BOARD.idFromName("global")).fetch(request);
     const m = url.pathname.match(/^\/room\/([A-Za-z0-9]{3,8})$/);
     if (!m) return new Response("livboj relay ok", { headers: { "content-type": "text/plain", ...CORS } });
     const id = env.ROOM.idFromName(m[1].toUpperCase());
@@ -115,18 +119,41 @@ function sanitize(e) {
   };
 }
 const order = (a, b) => b.score - a.score || b.ts - a.ts;
+// Merge by id: the copy already stored wins — except for a per-game id ("g<base36>-<base36>", from
+// clients since 2026-11), where a copy that got further (more points, then a later level, then a
+// longer time) replaces it. One game can arrive twice: the score so far when its last player left,
+// then (that player came back after all) the final result. Every older id merges as it always did:
+// first copy wins. (Those ids are built from the score itself, so two copies are identical anyway.)
+const GAME_ID = /^g[0-9a-z]{4,12}-[0-9a-z]{4,12}$/;
+const further = (a, b) => a.score - b.score || a.level - b.level || a.duration - b.duration;
 
 // ---- Förslagslåda ----------------------------------------------------------
 const FORSLAG_KEEP = 500, FORSLAG_TEXT = 500, FORSLAG_NAME = 14, FORSLAG_BODY = 4096, FORSLAG_GAP_MS = 10_000;
 // control characters out (the text keeps its line breaks), then trimmed
 const clean = (v, keepNewlines) => (typeof v === "string" ? v.replace(keepNewlines ? /[\u0000-\u0009\u000B-\u001F\u007F]/g : /[\u0000-\u001F\u007F]/g, keepNewlines ? (c) => (c === "\t" ? " " : "") : "").trim() : "");
 
+// ---- Anonymous daily counters ----------------------------------------------
+// One object per Stockholm calendar day under "stat:YYYY-MM-DD": event counts, and for mp_start a
+// histogram by player count plus their running sum. Nothing else is stored: no IP, user agent, name,
+// id or time finer than the day. The per-IP throttle lives in memory only (gone when the object sleeps).
+const STAT_EVENTS = ["visit", "solo_start", "mp_start", "join", "solo_done", "mp_done", "solo_abandoned", "mp_abandoned"];
+const STAT_BODY = 200, STAT_KEEP_DAYS = 400, STAT_WINDOW_MS = 60_000, STAT_PER_WINDOW = 60;
+const DAY_FMT = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Stockholm", year: "numeric", month: "2-digit", day: "2-digit" });
+function stockholmDate(ms) { const p = Object.fromEntries(DAY_FMT.formatToParts(new Date(ms)).map((x) => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; }
+function statRow(date, o = {}) {
+  const row = { date };
+  for (const k of STAT_EVENTS) row[k] = o[k] || 0;
+  row.mp_players = o.mp_players || {}; row.mp_players_sum = o.mp_players_sum || 0;
+  return row;
+}
+
 export class Board {
-  constructor(state, env) { this.state = state; this.env = env; this.lastPost = new Map(); }
+  constructor(state, env) { this.state = state; this.env = env; this.lastPost = new Map(); this.statHits = new Map(); }
 
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/forslag") return this.forslag(request, url);
+    if (url.pathname === "/stat") return this.stat(request, url);
     if (request.method === "GET") {
       const all = await this.all(), since = Date.now() - RECENT_MS;
       const recent = all.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX);
@@ -137,12 +164,16 @@ export class Board {
       const incoming = (Array.isArray(body && body.entries) ? body.entries : [body]).slice(0, MAX_POST).map(sanitize).filter(Boolean);
       const all = await this.all();
       const byId = new Map(all.map((e) => [e.id, e]));
-      let added = 0;
-      for (const e of incoming) if (!byId.has(e.id)) { byId.set(e.id, e); added++; }
+      let added = 0, updated = 0;
+      for (const e of incoming) {
+        const cur = byId.get(e.id);
+        if (!cur) { byId.set(e.id, e); added++; }
+        else if (GAME_ID.test(e.id) && further(e, cur) > 0) { byId.set(e.id, e); updated++; }
+      }
       const merged = [...byId.values()].sort(order).slice(0, KEEP);
-      if (added) await this.state.storage.put("entries", merged);
+      if (added || updated) await this.state.storage.put("entries", merged);
       const since = Date.now() - RECENT_MS;
-      return json({ entries: merged.slice(0, SHOW), recent: merged.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX), added });
+      return json({ entries: merged.slice(0, SHOW), recent: merged.filter((e) => e.ts >= since).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX), added, updated });
     }
     if (request.method === "DELETE") {
       const key = this.env.ADMIN_KEY;
@@ -191,5 +222,47 @@ export class Board {
       return json({ ok: true, left: kept.length });
     }
     return json({ error: "method" }, 405);
+  }
+
+  // POST /stat { e, n? }: +1 for that event on today's (Stockholm) row. The body is read as text
+  // whatever its content type, so a sendBeacon / text/plain POST works without a preflight.
+  async stat(request, url) {
+    if (request.method === "POST") {
+      if (+(request.headers.get("content-length") || 0) > STAT_BODY) return json({ error: "too large" }, 413);
+      const raw = await request.text();
+      if (raw.length > STAT_BODY) return json({ error: "too large" }, 413);
+      let body; try { body = JSON.parse(raw); } catch { return json({ error: "bad json" }, 400); }
+      const e = body && typeof body === "object" ? body.e : null;
+      if (typeof e !== "string" || !STAT_EVENTS.includes(e)) return json({ error: "unknown event" }, 400);
+      // soft flood guard: 60 events a minute per IP, held in memory only (never stored)
+      const ip = request.headers.get("cf-connecting-ip") || "?", now = Date.now();
+      let h = this.statHits.get(ip);
+      if (!h || now - h.t0 > STAT_WINDOW_MS) { h = { t0: now, n: 0 }; this.statHits.set(ip, h); }
+      if (++h.n > STAT_PER_WINDOW) return json({ error: "slow down" }, 429);
+      if (this.statHits.size > 2000) for (const [k, v] of this.statHits) if (now - v.t0 > STAT_WINDOW_MS) this.statHits.delete(k);
+      const date = stockholmDate(now), key = `stat:${date}`;
+      const cur = await this.state.storage.get(key);
+      const row = cur || {};
+      row[e] = (row[e] || 0) + 1;
+      if (e === "mp_start") {
+        const n = typeof body.n === "number" ? int(body.n, 1, 12) : null;
+        if (n !== null) { row.mp_players = row.mp_players || {}; row.mp_players[n] = (row.mp_players[n] || 0) + 1; row.mp_players_sum = (row.mp_players_sum || 0) + n; }
+      }
+      await this.state.storage.put(key, row);
+      if (!cur) await this.pruneStats(now); // a new day: drop the days older than STAT_KEEP_DAYS
+      return json({ ok: true });
+    }
+    if (request.method === "GET") {
+      if (!this.admin(url)) return json({ error: "forbidden" }, 403);
+      const days = int(url.searchParams.get("days") || 30, 1, STAT_KEEP_DAYS) || 30;
+      const rows = await this.state.storage.list({ prefix: "stat:", reverse: true, limit: days });
+      return json({ days: [...rows].map(([k, v]) => statRow(k.slice(5), v)) });
+    }
+    return json({ error: "method" }, 405);
+  }
+  async pruneStats(now) {
+    const cutoff = `stat:${stockholmDate(now - STAT_KEEP_DAYS * 86_400_000)}`;
+    const old = await this.state.storage.list({ prefix: "stat:", end: cutoff, limit: 128 });
+    if (old.size) await this.state.storage.delete([...old.keys()]);
   }
 }

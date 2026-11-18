@@ -38,9 +38,16 @@ https://philiphalle.github.io/livboj/host.html?relay=off
 The same Worker keeps the shared top list (one Durable Object, `Board`):
 
 ```
-GET  https://livboj-relay.livboj.workers.dev/board                    # { entries: [top 50] }
+GET  https://livboj-relay.livboj.workers.dev/board                    # { entries: [top 50], recent }
 POST https://livboj-relay.livboj.workers.dev/board  {"entries":[…]}   # merge by id, returns the list
 ```
+
+Merging by id: a copy whose id is already stored is ignored (first copy wins) — except for a
+per-game id (`g<base36>-<base36>`, sent by clients since 2026-11), where a copy that got further
+(more points, then a higher level, then a longer time) replaces the stored one. A game left
+mid-game is posted with the score so far; if its player came back after all and finished it, the
+final result replaces that copy instead of being dropped. Every older row merges exactly as before.
+The POST also accepts a `text/plain` body (a page that is closing sends it without a preflight).
 
 The host posts every finished round and, the first time it runs this version,
 uploads the old local list from its browser once. Anyone with the URL could
@@ -73,6 +80,41 @@ curl -s "https://livboj-relay.livboj.workers.dev/forslag?key=$ADMIN_KEY" | pytho
 Until a relay with this endpoint is deployed, `POST /forslag` answers 404 and
 the page shows its normal "Det gick inte att skicka" message (the text stays).
 
+## Anonymous daily counters (`/stat`)
+
+How many people open the game and how many games are played, per day. Kept in the same `Board`
+Durable Object, one storage key per day (`stat:YYYY-MM-DD`, the Europe/Stockholm calendar date;
+about 400 days kept). Nothing that identifies anyone is stored: no IP, user agent, name, id or time
+finer than the day — only the counts below. Nothing is shown to players.
+
+```
+POST /stat  {"e":"<event>","n":<players>}       # -> { ok: true }; any content type (a sendBeacon / text/plain works)
+GET  /stat?key=<ADMIN_KEY>[&days=30]           # -> { days: [{ date, visit, …, mp_players, mp_players_sum }] } newest first
+```
+
+| Event | Sent by | When |
+| --- | --- | --- |
+| `visit` | every page load of `index.html` or `host.html` (not the update watcher's own reload) | |
+| `solo_start` | the solo player | a solo game starts (also *Spela igen*) |
+| `mp_start` | the host, with `n` = players | *Starta spelet* (also the next game from the lobby); `mp_players` is a histogram by `n`, `mp_players_sum` their sum |
+| `join` | a joiner | its first state from the host (it is in the room) |
+| `solo_done` / `mp_done` | solo / the host (or a promoted host) | the game reached game over, the last level, or *Avsluta spelet* |
+| `solo_abandoned` / `mp_abandoned` | whoever would record the result | the game's last player left mid-game (counted also at score 0) |
+
+A game is counted once: never both `*_done` and `*_abandoned`, and a level change is not a new game.
+A phone that was killed in the background sends its `*_abandoned` on the next visit (that day's row).
+Unknown events or bad JSON get 400, bodies over 200 bytes 413; one IP may send 60 events a minute
+(429 after that; the counter lives in memory only and is never stored). Every POST is one request
+against the free plan's daily cap, which is why the game sends one per page load / game event and
+nothing periodic. The game itself stays silent in automated browsers (`navigator.webdriver`) and on a
+page served from localhost / 127.0.0.1, unless the relay in use is local (`wrangler dev`).
+
+To read them (the same `ADMIN_KEY` as for the Förslagslåda):
+
+```bash
+curl -s "https://livboj-relay.livboj.workers.dev/stat?key=$ADMIN_KEY&days=14" | python3 -m json.tool
+```
+
 ## Rooms: broadcast, or to one player
 
 A message `{ t: "msg", a, d }` goes to everyone else in the room, as `{ t: "msg", a, from, d }`.
@@ -93,5 +135,6 @@ npx wrangler dev --local     # serves ws://localhost:8787
 ```
 
 then open the game with `?relay=ws://localhost:8787`. The repo's smoke test can
-drive it end to end: `node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787`,
-and `node tools/load.mjs --relay ws://127.0.0.1:8787` plays an 8-player game against it.
+drive it end to end: `node tools/smoke.mjs --only forslag,live,team,leavemp --relay ws://127.0.0.1:8787`,
+and `node tools/load.mjs --relay ws://127.0.0.1:8787` plays an 8-player game against it. The counters:
+`curl -s "http://127.0.0.1:8787/stat?key=local-test-key"`.

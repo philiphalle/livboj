@@ -60,7 +60,8 @@ export function watchUpdates(build, { isIdle, reloadUrl } = {}) {
   if (!build) return () => {};
   let stopped = false, notified = false, timer = 0;
   const target = () => (reloadUrl && reloadUrl()) || location.href;
-  const reload = () => { stopped = true; location.replace(target()); };
+  // (marked for game.js: an update reload is not a new visit in the anonymous counters)
+  const reload = () => { stopped = true; try { sessionStorage.setItem("livboj-update-reload", "1"); } catch {} location.replace(target()); };
 
   async function check() {
     if (stopped || document.hidden) return;
