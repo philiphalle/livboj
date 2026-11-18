@@ -187,8 +187,10 @@ export function createSim({ rng = Math.random, selfId = () => null, selfPos = { 
   };
   // CLEARED -> the next level's INTRO, or WIN after the last one.
   S.nextLevel = function nextLevel() {
+    // After the last level the index stays on it: an index past the end made levelParams throw,
+    // which stopped the frame loop before the win screen was ever drawn.
+    if (S.levelIndex + 1 >= BASE_LEVELS.length) { S.phase = Phase.WIN; fire("result"); fire("sound", "win"); fire("phase"); fire("push"); return; }
     S.levelIndex++;
-    if (S.levelIndex >= BASE_LEVELS.length) { S.phase = Phase.WIN; fire("result"); fire("sound", "win"); fire("phase"); fire("push"); return; }
     S.startLevel(S.levelIndex); S.phase = Phase.INTRO; S.introTimer = 2.4; fire("phase"); fire("push");
   };
 

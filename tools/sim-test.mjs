@@ -258,6 +258,8 @@ test("next level: INTRO of the following level with a fresh count; after level 8
   const last = mk({ level: 7, phase: Phase.CLEARED });
   last.S.nextLevel();
   assert.equal(last.S.phase, Phase.WIN);
+  // the index stays on the last level, so the HUD and state push can still look its numbers up
+  assert.equal(last.S.levelIndex, 7); assert.doesNotThrow(() => levelParams(last.S.levelIndex, 1));
   assert.deepEqual(last.log, ["result", "sound:win", "phase:win", "push"]);
 });
 test("a new game resets score, streaks and every player's tally", () => {
