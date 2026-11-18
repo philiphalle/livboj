@@ -11,6 +11,9 @@
 //     { t: "msg", a: <action>, from: <id>, d: <payload> }
 //   Client -> server:
 //     { t: "msg", a: <action>, d: <payload> }   (broadcast to everyone else)
+//     { t: "msg", a: <action>, d: <payload>, to: <id> }   (only to that id's socket(s);
+//        an id not in the room: dropped. Older relays ignore `to` and broadcast — the
+//        clients cope with both: a receiver never relies on not getting a message.)
 //
 // Leaderboard:
 //   GET  /board                      -> { entries: [top 50] }
@@ -59,7 +62,17 @@ export class Room {
 
   webSocketMessage(ws, message) {
     let m; try { m = JSON.parse(message); } catch { return; }
-    if (m && m.t === "msg") this.broadcast({ t: "msg", a: m.a, from: this.state.getTags(ws)[0], d: m.d }, ws);
+    if (!m || m.t !== "msg") return;
+    const out = { t: "msg", a: m.a, from: this.state.getTags(ws)[0], d: m.d };
+    // Directed: `to` (a peer id) goes only to that id's socket(s) — every one of them, since a
+    // reconnecting client briefly has two. An id not in the room: dropped. No `to`: broadcast.
+    if (typeof m.to === "string" && m.to) {
+      const s = JSON.stringify(out);
+      let targets = []; try { targets = this.state.getWebSockets(m.to.slice(0, 64)); } catch {}
+      for (const t of targets) if (t !== ws) { try { t.send(s); } catch {} }
+      return;
+    }
+    this.broadcast(out, ws);
   }
   webSocketClose(ws) { this.leave(ws); }
   webSocketError(ws) { this.leave(ws); }

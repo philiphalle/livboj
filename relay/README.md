@@ -73,6 +73,18 @@ curl -s "https://livboj-relay.livboj.workers.dev/forslag?key=$ADMIN_KEY" | pytho
 Until a relay with this endpoint is deployed, `POST /forslag` answers 404 and
 the page shows its normal "Det gick inte att skicka" message (the text stays).
 
+## Rooms: broadcast, or to one player
+
+A message `{ t: "msg", a, d }` goes to everyone else in the room, as `{ t: "msg", a, from, d }`.
+With `to: "<id>"` it goes only to that id's socket(s) (all of them: a reconnecting client briefly
+has two); an id not in the room drops it. The game sends a joiner's position to the host this way.
+The forwarded message has the same shape either way; a client that never sends `to` (grabbhelg, an
+older Livbojen) sees no difference. `node tools/relay-check.mjs --relay <ws url>` checks it.
+
+The free plan's 100,000 requests a day are for the whole account, and the messages clients send
+over a room's WebSocket count towards it (Cloudflare bills 20 incoming messages as one request).
+`node tools/load.mjs` measures a game's rate and turns it into hours of play per day.
+
 ## Local test (no account needed)
 
 ```bash
@@ -81,4 +93,5 @@ npx wrangler dev --local     # serves ws://localhost:8787
 ```
 
 then open the game with `?relay=ws://localhost:8787`. The repo's smoke test can
-drive it end to end: `node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787`.
+drive it end to end: `node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787`,
+and `node tools/load.mjs --relay ws://127.0.0.1:8787` plays an 8-player game against it.
