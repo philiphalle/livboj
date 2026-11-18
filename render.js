@@ -446,7 +446,7 @@ export function createRenderer(canvas, ui) {
     for (let k = 5; k >= 1; k--) { blob(1 + k * 0.035, 0.012); g.fillStyle = `rgba(92,128,48,${0.05 + (5 - k) * 0.012})`; g.fill(); }
     // body: deep olive murk in the middle, brighter algae toward the rim
     const body = g.createRadialGradient(cx - rx * 0.1, cy - ry * 0.1, Math.min(rx, ry) * 0.1, cx, cy, Math.max(rx, ry) * 1.02);
-    body.addColorStop(0, "rgba(38,66,30,0.66)"); body.addColorStop(0.55, "rgba(58,94,38,0.55)"); body.addColorStop(0.85, "rgba(96,132,52,0.48)"); body.addColorStop(1, "rgba(128,158,66,0.40)");
+    body.addColorStop(0, "rgba(38,66,30,0.58)"); body.addColorStop(0.55, "rgba(58,94,38,0.47)"); body.addColorStop(0.85, "rgba(96,132,52,0.40)"); body.addColorStop(1, "rgba(128,158,66,0.34)");
     blob(1); g.fillStyle = body; g.fill();
     g.save(); blob(1); g.clip();
     // mottling: dark open-water pockets and lighter algae clouds
@@ -466,8 +466,8 @@ export function createRenderer(canvas, ui) {
     for (let i = 0; i < 9; i++) { const a = rnd() * Math.PI * 2, f = rnd() * 0.7, x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f, L = 14 + rnd() * 22; g.lineWidth = 1.5 + rnd() * 2; g.beginPath(); g.moveTo(x - L, y); g.bezierCurveTo(x - L / 3, y - 5, x + L / 3, y + 5, x + L, y - 1); g.stroke(); }
     g.restore();
     // rim: algae piling up along the edge, a soft bright band
-    g.save(); blob(1); g.clip(); g.strokeStyle = "rgba(196,222,120,0.22)"; g.lineWidth = 5; blob(1, 0.01); g.stroke();
-    g.strokeStyle = "rgba(214,236,140,0.28)"; g.lineWidth = 1.2; blob(0.985, 0.012); g.stroke(); g.restore();
+    g.save(); blob(1); g.clip(); g.strokeStyle = "rgba(196,222,120,0.16)"; g.lineWidth = 5; blob(1, 0.01); g.stroke();
+    g.strokeStyle = "rgba(214,236,140,0.16)"; g.lineWidth = 1.1; blob(0.985, 0.012); g.stroke(); g.restore();
     c = { cv, x: z.x - M, y: z.y - M, w: z.w + M * 2, h: z.h + M * 2 };
     swampCache.set(key, c);
     return c;
