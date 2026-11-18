@@ -1,6 +1,7 @@
 // Shared bits for tools/shot.mjs and tools/smoke.mjs: a static file server for
-// the repo (with ETag / Last-Modified like GitHub Pages, so boot.js versions
-// game.js the same way) and a Playwright + Chromium found on this machine.
+// the repo (with ETag / Last-Modified and a 10-minute max-age like GitHub
+// Pages, so boot.js versions the modules the same way) and a Playwright +
+// Chromium found on this machine.
 //
 // Playwright is not a dependency of the game. It is looked up in, in order:
 // this repo's node_modules (`npm install` with the dev package.json), the npx
@@ -18,19 +19,24 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".json": "application/json",
   ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png", ".css": "text/css", ".md": "text/markdown; charset=utf-8" };
 
-/** Serve ROOT on 127.0.0.1:<port> (0 = any free port). -> { url, close() } */
+/**
+ * Serve ROOT on 127.0.0.1:<port> (0 = any free port). -> { url, close(), overrides }
+ * `overrides` (a Map of "/path" -> content) is served instead of the file on
+ * disk, ETag and all: a test can "deploy" a changed file without touching the repo.
+ */
 export function serve(port = 0) {
+  const overrides = new Map();
   const server = http.createServer((req, res) => {
     let p = decodeURIComponent(new URL(req.url, "http://x").pathname);
     if (p.endsWith("/")) p += "index.html";
     const file = path.join(ROOT, p);
     if (!file.startsWith(ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end("not found"); return; }
-    const body = fs.readFileSync(file), st = fs.statSync(file);
+    const over = overrides.has(p), body = over ? Buffer.from(overrides.get(p)) : fs.readFileSync(file), st = over ? { mtime: new Date() } : fs.statSync(file);
     const etag = `"${crypto.createHash("sha1").update(body).digest("hex").slice(0, 16)}"`;
     res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream", etag, "last-modified": st.mtime.toUTCString(), "cache-control": "max-age=600" });
     res.end(req.method === "HEAD" ? undefined : body);
   });
-  return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => new Promise((r) => server.close(r)) })));
+  return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => new Promise((r) => server.close(r)), overrides })));
 }
 
 export function findPlaywright() {

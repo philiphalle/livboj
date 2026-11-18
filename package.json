@@ -1,9 +1,10 @@
 {
   "name": "livboj-tools",
   "private": true,
-  "description": "Only for tools/ (screenshots, smoke test, icons). The game itself has no dependencies and no build step.",
+  "description": "Only for tools/ (sim tests, screenshots, smoke test, icons). The game itself has no dependencies and no build step.",
   "type": "module",
   "scripts": {
+    "test": "node tools/sim-test.mjs",
     "smoke": "node tools/smoke.mjs",
     "shot": "node tools/shot.mjs",
     "icons": "node tools/icons.mjs"

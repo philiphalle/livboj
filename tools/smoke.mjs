@@ -3,7 +3,7 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,keys,board,menu,forslag,live
+//   node tools/smoke.mjs --only layout,fullscreen,keys,board,cache,menu,forslag,live
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
@@ -11,9 +11,11 @@
 // "Vrid mobilen" in portrait, the fullscreen button clear of the HUD); the menu
 // usable and scrollable on phones; fullscreen by a real click and by F (not
 // while typing); blur releases held keys; the leaderboard outbox (a failed post
-// is queued and flushed exactly once on the next load, a 4xx is dropped); and
+// is queued and flushed exactly once on the next load, a 4xx is dropped);
+// cache busting (the build id covers every module, each module loads once under
+// ?v=<build>, a change to sim.js alone is noticed and a reload runs it); and
 // with --live, that a forced reconnect neither drops nor duplicates a player
-// and never starts a host election.
+// and never starts a host election. The rules themselves: tools/sim-test.mjs.
 //
 // The leaderboard is ALWAYS stubbed (harness.mjs stubBoard): no test posts to the real board.
 import { serve, launch, stubBoard } from "./harness.mjs";
@@ -272,6 +274,66 @@ if (want("board")) {
   await sleep(1500);
   ok(postsWith("smoke-test-4xx") === 1 && !(await page.evaluate(() => localStorage.getItem("livboj-board-queue"))), "a 4xx answer drops the entry after one attempt", `attempts ${postsWith("smoke-test-4xx")}`);
   ok(!errors.filter((e) => !/503|400|Failed to load resource/.test(e)).length, "no console/page errors (besides the stubbed failures)", errors.join(" | "));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- cache busting across modules
+// GitHub Pages caches every file for 10 minutes (the harness does the same). The
+// build id must cover every module, and every module must be loaded under a
+// URL carrying it — or a changed sim.js alone would run stale or mixed code.
+if (want("cache")) {
+  console.log("cache");
+  const fs = await import("node:fs"), path = await import("node:path");
+  const { ROOT } = await import("./harness.mjs");
+  const { MODULES } = await import("../boot.js");
+  const src = (f) => fs.readFileSync(path.join(ROOT, f), "utf8");
+  const rootJs = fs.readdirSync(ROOT).filter((f) => f.endsWith(".js") && f !== "boot.js").sort();
+  ok(JSON.stringify(rootJs) === JSON.stringify([...MODULES].sort()), "boot.js MODULES lists exactly the game's module files", MODULES.join(", "));
+  const staticSib = MODULES.filter((f) => /^\s*(import|export)\b[^;(]*?\bfrom\s*["']\.\.?\//m.test(src(f)) || /^\s*import\s*["']\.\.?\//m.test(src(f)));
+  const unversioned = MODULES.filter((f) => (src(f).match(/import\(\s*[`"']\.\/[^`"']*[`"']/g) || []).some((s) => !/\$\{(V|new URL\(import\.meta\.url\)\.search)\}/.test(s)));
+  ok(!staticSib.length && !unversioned.length, "no module imports a sibling statically or without its own ?v=", [...staticSib, ...unversioned].join(", "));
+
+  const { context, page, errors } = await newPage({ w: 1366, h: 768 });
+  const reqs = [];
+  page.on("request", (r) => { const u = new URL(r.url()); if (u.origin + "/" === BASE && u.pathname.endsWith(".js") && r.method() === "GET") reqs.push(u.pathname.slice(1) + u.search); });
+  const build = () => page.evaluate(() => import("./boot.js").then((m) => m.currentBuild()));
+  const head = async (f) => (await fetch(BASE + f, { method: "HEAD" })).headers.get("etag");
+  // each module requested under exactly one URL, the one with this build (two URLs = two module instances)
+  const loadedUnder = (b) => MODULES.every((f) => { const urls = new Set(reqs.filter((r) => r.split("?")[0] === f)); return urls.size === 1 && urls.has(`${f}?v=${b}`); });
+  await openMenu(page);
+  const b1 = await build();
+  ok(/^[0-9a-f]{16}$/.test(b1) && loadedUnder(b1), "every module is loaded once, under ?v=<build>", `build ${b1}; ${reqs.filter((r) => !r.startsWith("boot.js")).join(" ")}`);
+  const simSrc = src("sim.js"), game0 = await head("game.js");
+  server.overrides.set("/sim.js", simSrc + '\nglobalThis.__simProbe = "v2";\n'); // "deploy" a sim.js change — nothing else
+  const b2 = await build();
+  ok(b2 && b2 !== b1 && (await head("game.js")) === game0, "changing only sim.js changes the build (game.js's own ETag is unchanged)", `${b1} -> ${b2}`);
+  // idle on the menu: the watcher reloads silently, and the reload runs the new sim.js
+  reqs.length = 0;
+  const reloaded = page.waitForNavigation({ waitUntil: "load", timeout: 8000 }).then(() => true, () => false);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus"))); // the watcher checks on focus (and every minute)
+  const didReload = await reloaded;
+  if (didReload) await page.waitForFunction(() => document.getElementById("solo") && document.getElementById("boardSrc").textContent !== "hämtar…", null, { timeout: 15000 });
+  ok(didReload && await page.evaluate(() => globalThis.__simProbe === "v2") && loadedUnder(b2), "the update watcher noticed it on the menu and reloaded; the reload runs the new sim.js, all modules under the new build",
+    `${didReload ? "reloaded" : "NO reload"}: ${reqs.filter((r) => !r.startsWith("boot.js")).join(" ")}`);
+  // mid-game: a banner instead, and "Uppdatera nu" brings the new code
+  await startSolo(page); await waitPlay(page);
+  server.overrides.set("/sim.js", simSrc + '\nglobalThis.__simProbe = "v3";\n');
+  const b3 = await build();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForSelector("#livboj-update", { timeout: 5000 }).catch(() => {});
+  const banner = await page.evaluate(() => !!document.getElementById("livboj-update") && !!window.livboj && window.livboj.debug().phase === "play");
+  ok(banner, "mid-game the watcher shows the update banner and does not reload");
+  reqs.length = 0;
+  if (banner) {
+    await Promise.all([page.waitForNavigation({ waitUntil: "load" }), page.click("#livboj-update button")]);
+    // (#solo is in the HTML; the board line changes only once the modules have loaded)
+    await page.waitForFunction(() => document.getElementById("solo") && document.getElementById("boardSrc").textContent !== "hämtar…", null, { timeout: 15000 });
+  }
+  const probe3 = banner ? await page.evaluate(() => globalThis.__simProbe) : "";
+  ok(probe3 === "v3" && loadedUnder(b3), "\"Uppdatera nu\" reloads into the new build", `build ${b3}, sim.js probe ${probe3}: ${reqs.filter((r) => !r.startsWith("boot.js")).join(" ")}`);
+  server.overrides.clear();
+  ok((await build()) === b1, "back to the files on disk: back to the first build");
+  ok(!errors.length, "no console/page errors", errors.join(" | "));
   await context.close();
 }
 

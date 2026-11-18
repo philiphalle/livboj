@@ -13,12 +13,15 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | --- | --- |
 | `index.html` | Start page: your name, *Spela själv* (solo), join a room by code, the global leaderboard. Also the in-game page for solo and joiners. |
 | `host.html` | Host page: create a lobby (room code + invite link), start the game, end it. |
-| `game.js` | Everything else: simulation, rendering (canvas, logical 900×600), input, networking, leaderboard client, page chrome (fullscreen, rotate hint, iOS fixes). |
-| `boot.js` | Loads `game.js?v=<its ETag>` and watches for new builds (see *Deploy*). |
+| `game.js` | `createGame()`: wires sim, renderer and network together for solo / host / join — state sync to joiners, host migration, input, the frame loop — plus sound and the page chrome (fullscreen, rotate hint, iOS fixes). |
+| `sim.js` | The rules: levels, world size, spawning, swimmers, monsters, whirlpools, swamps, docks, collisions, scoring, phases. Pure (no DOM, audio, network, storage or clock), so node runs it; solo and the host run it, joiners only draw the host's state. |
+| `render.js` | Everything drawn on the canvas (logical 900×600, HiDPI backing store). |
+| `net.js` | The room transports (WebSocket relay, Trystero P2P fallback) and the relay's HTTP endpoints (leaderboard + its localStorage outbox, Förslagslåda). |
+| `boot.js` | Fingerprints every module, loads `game.js?v=<build>` and watches for new builds (see *Deploy*). |
 | `nyheter.json` | The news shown on the start page (see *Nyheter* below). |
 | `manifest.webmanifest`, `icons/`, `favicon.svg` | Add-to-home-screen / install (fullscreen on phones). No service worker. |
 | `relay/` | Cloudflare Worker: the WebSocket room relay and the global leaderboard (`relay/README.md`). |
-| `tools/` | Dev only: `smoke.mjs` (automated checks), `shot.mjs` (screenshots), `icons.mjs` (renders `icons/` from `favicon.svg`). |
+| `tools/` | Dev only: `sim-test.mjs` (tests for the rules, plain node), `smoke.mjs` (browser checks), `shot.mjs` (screenshots), `icons.mjs` (renders `icons/` from `favicon.svg`). |
 
 ## Run locally
 
@@ -75,19 +78,28 @@ Below the news, the *Förslagslåda* sends a player's suggestion to the relay (`
 ## Deploy
 
 Push to `main` → GitHub Pages publishes the folder. GitHub Pages caches files for 10 minutes, so
-`boot.js` asks for `game.js`'s current ETag (uncached HEAD) and imports `game.js?v=<etag>`: every
-build gets its own URL and a page load always runs the latest game. While a tab is open it checks
-every minute; on the menu it reloads silently, mid-game it shows an *Uppdatera nu* banner.
-Only `game.js` is fingerprinted, so game code belongs in `game.js` (statically imported siblings
-would not be cache-busted). URLs must stay relative: the site lives under `/livboj/`.
+`boot.js` asks for the current ETag of every module in its `MODULES` list (uncached HEADs), hashes
+them into one build id and imports `game.js?v=<build>`; `game.js` (and `render.js`) import their
+siblings with that same `?v=`. Every build gets its own URL for every module, a page load always
+runs the latest game, and no page can mix an old `sim.js` with a new `game.js`. While a tab is
+open it checks every minute; on the menu it reloads silently, mid-game it shows an *Uppdatera nu*
+banner. Two rules keep this working:
+
+- A new module file goes into `MODULES` in `boot.js` (`node tools/smoke.mjs --only cache` checks).
+- Modules import each other only as `` await import(`./sim.js${new URL(import.meta.url).search}`) ``,
+  never with a static `import … from "./sim.js"`: that URL has no `?v=`, so it would be a second,
+  stale copy of the module.
+
+URLs must stay relative: the site lives under `/livboj/`.
 
 The relay is deployed separately with `npx wrangler deploy` in `relay/` (see `relay/README.md`).
 
 ## Checks
 
 ```bash
-npm install                       # once: Playwright for the tools (or it is found in the npx cache)
-node tools/smoke.mjs              # layout, fullscreen, input, leaderboard queue (leaderboard always stubbed)
+node tools/sim-test.mjs           # the rules (sim.js) in plain node: no install, no browser, ~1 s
+npm install                       # once: Playwright for the tools below (or it is found in the npx cache)
+node tools/smoke.mjs              # layout, fullscreen, input, leaderboard queue, cache busting (leaderboard always stubbed)
 node tools/smoke.mjs --live       # + host/join and forced reconnects through the live relay
 node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
 node tools/shot.mjs               # screenshots of menu + solo game at desktop and phone sizes -> shots/
