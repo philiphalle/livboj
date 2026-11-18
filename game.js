@@ -251,6 +251,142 @@ function flushBoardQueue() {
 flushBoardQueue();
 addEventListener("online", () => { flushBoardQueue(); });
 
+// ---- Page chrome (index.html and host.html) --------------------------------
+// Fullscreen button + F key, the "Vrid mobilen" card, the add-to-home-screen
+// hint, gesture blocking on the game, and the iOS scroll-offset fix. Lives here
+// (not in its own module) because game.js is the one file boot.js cache-busts.
+const UA = navigator.userAgent || "";
+const IS_IOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+// in-app browsers (Messenger, Instagram, Snapchat, TikTok, the Google app…) can't add to the home screen
+const IN_APP = /FBAN|FBAV|FB_IAB|FBIOS|MessengerForiOS|Messenger|Instagram|Snapchat|musical_ly|Bytedance|TikTok|LinkedInApp|Line\/|GSA\//i.test(UA);
+const IOS_OTHER_BROWSER = /CriOS|FxiOS|EdgiOS|OPiOS|YaBrowser/i.test(UA);
+const isStandalone = () => navigator.standalone === true || matchMedia("(display-mode: standalone)").matches || matchMedia("(display-mode: fullscreen)").matches;
+const isTextField = (el) => !!el && (el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ||
+  (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|range|color|file|image)$/i.test(el.type || "")));
+const coarsePointer = () => matchMedia("(pointer: coarse)").matches;
+
+// iOS can leave the window scrolled after a rotation, a toolbar change or the
+// keyboard (also across a reload): the page is then drawn higher than where
+// taps land ("I have to tap a cm below the button"). Put any offset back to
+// 0,0 — never while pinch-zoomed (the user's own) or while a text field has the
+// focus (the keyboard lifts the page on purpose). Element scrolling (the
+// menu's .cards) is untouched: only the window's offset is reset.
+// (Ported from grabbhelg public/src/viewport.js.)
+function unshift() {
+  const v = window.visualViewport, d = document.documentElement, b = document.body;
+  if (v && v.scale > 1.01) return false;
+  if (isTextField(document.activeElement)) return false;
+  if (!(window.scrollX || window.scrollY || (v && (v.offsetTop || v.offsetLeft)) || d.scrollTop || (b && b.scrollTop))) return false;
+  window.scrollTo(0, 0); d.scrollTop = 0; if (b) b.scrollTop = 0;
+  window.livbojUnshifts = (window.livbojUnshifts || 0) + 1;
+  return true;
+}
+let unshiftOn = false;
+function keepUnshifted() {
+  if (unshiftOn) return; unshiftOn = true;
+  const soon = () => { unshift(); requestAnimationFrame(() => unshift()); for (const ms of [120, 350, 800]) setTimeout(unshift, ms); };
+  addEventListener("resize", () => unshift(), { passive: true });
+  addEventListener("scroll", () => unshift(), { passive: true }); // the window's own scroll only
+  if (window.visualViewport) { visualViewport.addEventListener("resize", () => unshift()); visualViewport.addEventListener("scroll", () => unshift()); }
+  addEventListener("orientationchange", soon); // iOS reports a rotation's sizes late
+  if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener("change", soon);
+  addEventListener("pageshow", soon);
+  addEventListener("focusout", () => setTimeout(unshift, 60)); // the keyboard going away
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) soon(); });
+  soon();
+}
+
+const FS_ENTER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const FS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const HOMEHINT_KEY = "livboj-homehint-until";
+
+/**
+ * Wire the page chrome. Every element is optional (an older cached page may
+ * lack one). Returns { setPlaying(on) } — call it when the game shows/hides.
+ */
+export function initChrome({ stage, fsBtn, rotateCard, homeHint } = {}) {
+  keepUnshifted();
+  const root = document.documentElement;
+  let playing = false, rotateDismissed = false;
+
+  // Pinch, double-tap zoom, the long-press menu and text selection: blocked on
+  // the game only, never on the menu's inputs.
+  if (stage) for (const t of ["gesturestart", "dblclick", "contextmenu", "selectstart"]) stage.addEventListener(t, (e) => e.preventDefault(), { passive: false });
+
+  // ---- Fullscreen. The whole page goes fullscreen (not the canvas), so the
+  // button, the rotate card, the update banner and — on the host — the lobby
+  // all stay visible. Missing API (iPhone Safari): no button at all.
+  const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  const canFs = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled) && !!(root.requestFullscreen || root.webkitRequestFullscreen);
+  function toggleFullscreen() {
+    try {
+      if (fsElement()) { const p = document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen && document.webkitExitFullscreen(); if (p && p.catch) p.catch(() => {}); }
+      else { const p = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" }) : root.webkitRequestFullscreen(); if (p && p.catch) p.catch(() => {}); }
+    } catch {}
+  }
+  function onFsChange() {
+    const on = !!fsElement();
+    root.classList.toggle("is-fs", on);
+    if (fsBtn) { fsBtn.innerHTML = on ? FS_EXIT : FS_ENTER; fsBtn.setAttribute("aria-label", on ? "Avsluta helskärm" : "Helskärm"); fsBtn.title = on ? "Avsluta helskärm (F)" : "Helskärm (F)"; }
+    // phones: hold it sideways while fullscreen (not every browser allows it)
+    const o = screen.orientation;
+    if (on && coarsePointer() && o && o.lock) { try { const p = o.lock("landscape"); if (p && p.catch) p.catch(() => {}); } catch {} }
+    else if (!on && o && o.unlock) { try { o.unlock(); } catch {} }
+    updateRotate();
+  }
+  document.addEventListener("fullscreenchange", onFsChange);
+  document.addEventListener("webkitfullscreenchange", onFsChange);
+  if (fsBtn) {
+    fsBtn.hidden = true;
+    fsBtn.innerHTML = FS_ENTER;
+    // a real click handler: touchstart on the canvas carries no user activation
+    fsBtn.addEventListener("click", (e) => { toggleFullscreen(); e.currentTarget.blur(); }); // (blur: Space/Enter must stay game keys)
+  }
+  addEventListener("keydown", (e) => {
+    if ((e.key !== "f" && e.key !== "F") || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isTextField(e.target) || isTextField(document.activeElement)) return; // typing a name / a suggestion
+    if (!playing || !canFs) return;
+    e.preventDefault(); toggleFullscreen();
+  });
+
+  // ---- "Vrid mobilen": a touch device held upright while a game shows. The
+  // game keeps running underneath; a tap closes it for this page.
+  function updateRotate() {
+    if (!rotateCard) return;
+    const show = playing && !rotateDismissed && coarsePointer() && innerHeight > innerWidth;
+    rotateCard.hidden = !show;
+  }
+  if (rotateCard) {
+    const dismiss = (e) => { e.preventDefault(); e.stopPropagation(); rotateDismissed = true; updateRotate(); };
+    rotateCard.addEventListener("click", dismiss);
+    rotateCard.addEventListener("touchend", dismiss, { passive: false });
+    rotateCard.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") dismiss(e); });
+  }
+  addEventListener("resize", updateRotate);
+  addEventListener("orientationchange", () => setTimeout(updateRotate, 200));
+
+  // ---- iPhone / iPad Safari (not already a home-screen app, not an in-app
+  // browser): fullscreen only comes by adding the page to the home screen.
+  // Dismissal is remembered for 30 days. ?homehint=1 forces it (screenshots).
+  if (homeHint) {
+    let force = false; try { force = new URLSearchParams(location.search).get("homehint") === "1"; } catch {}
+    let snoozed = false; try { snoozed = +localStorage.getItem(HOMEHINT_KEY) > Date.now(); } catch {}
+    homeHint.hidden = !(force || (IS_IOS && !IN_APP && !IOS_OTHER_BROWSER && !isStandalone() && !snoozed));
+    const close = homeHint.querySelector("button");
+    if (close) close.addEventListener("click", () => { homeHint.hidden = true; try { localStorage.setItem(HOMEHINT_KEY, String(Date.now() + 30 * 24 * 3600 * 1000)); } catch {} });
+  }
+
+  onFsChange();
+  return {
+    setPlaying(on) {
+      playing = !!on;
+      if (fsBtn) fsBtn.hidden = !(playing && canFs);
+      if (homeHint && playing) homeHint.hidden = true;
+      updateRotate();
+    },
+    toggleFullscreen,
+  };
+}
 
 // ---- Water texture ---------------------------------------------------------
 // A seamless value-noise tile of soft light filaments, scrolled in two layers
@@ -1526,12 +1662,17 @@ export function createGame(canvas, opts) {
   }
   // HiDPI backing store: draw in logical CW×CH coords but back the canvas with
   // (displayed size × devicePixelRatio) pixels so text and edges stay crisp.
-  let backK = 1, lastClientW = 0, lastDpr = 0;
+  // Capped so a big retina screen doesn't melt: pixel ratio at most 2 on
+  // desktop and 1.5 on phones/tablets, and at most MAX_BACK_W pixels wide.
+  // Checked every frame (cheap), so it follows resizes, fullscreen, a window
+  // moved to another screen and the cap itself changing.
+  let backK = 1;
+  const MAX_BACK_W = 2560, coarseMQ = matchMedia("(pointer: coarse)");
   function fitBacking() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2), cw = canvas.clientWidth;
-    if (!cw || (cw === lastClientW && dpr === lastDpr)) return;
-    lastClientW = cw; lastDpr = dpr;
-    const w = Math.round(cw * dpr), h = Math.round(w * CH / CW);
+    const cw = canvas.clientWidth;
+    if (!cw) return;
+    const k = Math.min(window.devicePixelRatio || 1, coarseMQ.matches ? 1.5 : 2, MAX_BACK_W / cw);
+    const w = Math.max(1, Math.round(cw * k)), h = Math.round(w * CH / CW);
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     backK = canvas.width / CW;
   }
@@ -1723,6 +1864,7 @@ export function createGame(canvas, opts) {
   // ---- Input wiring -------------------------------------------------------
   const MOVE_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Space"]);
   addEventListener("keydown", (e) => {
+    if (isTextField(e.target)) return; // (no text field shows during a game, but never steal typing)
     const k = e.key === " " ? "Space" : e.key; keys[k] = true;
     if (MOVE_KEYS.has(e.key) || MOVE_KEYS.has(k)) e.preventDefault();
     if (e.repeat) return;
