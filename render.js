@@ -8,6 +8,8 @@
 // Sibling modules are imported with this module's own ?v=<build> (see boot.js):
 // a plain `import … from "./sim.js"` would load a second, uncached copy.
 const { SHORE_H, EAT_DWELL, shoreY, Phase, BASE_LEVELS, SKINS, HAIRS } = await import(`./sim.js${new URL(import.meta.url).search}`);
+// the water (GPU layer under the canvas, or its 2D fallback): water.js
+const { createWater, drawWater2D } = await import(`./water.js${new URL(import.meta.url).search}`);
 
 const SUITS = ["#e5484d", "#3aa0ff", "#ffb020", "#8b5cf6", "#22c55e", "#ec4899"];
 const GULLS = [{ y: 46, sp: 26, x0: 0, ph: 0 }, { y: 82, sp: 34, x0: 220, ph: 1.4 }, { y: 62, sp: 20, x0: 440, ph: 2.7 }];
@@ -19,38 +21,6 @@ function shadeHex(hex, f) {
 const shade = (c) => shadeHex(c, 0.72);
 const tint = (c) => shadeHex(c, 1.2);
 const hi = (c) => shadeHex(c, 1.34);
-
-// ---- Water texture ---------------------------------------------------------
-// A seamless value-noise tile of soft light filaments, scrolled in two layers
-// to fake sunlight refracted through the surface (the classic caustics trick).
-let CAUSTIC = null;
-function causticTile() {
-  if (CAUSTIC) return CAUSTIC;
-  const S = 256, P = 8; // pixels, base lattice period (divides S -> seamless)
-  let seed = 1234567;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-  const lat = [];
-  for (let k = 0; k < 3; k++) { const per = P << k; const g = new Float32Array(per * per); for (let i = 0; i < g.length; i++) g[i] = rnd(); lat.push({ per, g }); }
-  const smooth = (t) => t * t * (3 - 2 * t);
-  const sample = (L, u, v) => {
-    const x0 = Math.floor(u), y0 = Math.floor(v), fx = smooth(u - x0), fy = smooth(v - y0), per = L.per;
-    const at = (x, y) => L.g[((y % per + per) % per) * per + ((x % per + per) % per)];
-    const a = at(x0, y0), b = at(x0 + 1, y0), c = at(x0, y0 + 1), d = at(x0 + 1, y0 + 1);
-    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
-  };
-  const cv = document.createElement("canvas"); cv.width = cv.height = S;
-  const c2 = cv.getContext("2d"); const img = c2.createImageData(S, S); const px = img.data;
-  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    let n = 0, amp = 0.55, tot = 0;
-    for (let k = 0; k < 3; k++) { const L = lat[k]; n += sample(L, x / S * L.per, y / S * L.per) * amp; tot += amp; amp *= 0.5; }
-    n /= tot;
-    const ridge = 1 - Math.min(1, Math.abs(n - 0.5) * 5); // bright where the field crosses its middle -> a filament network
-    const a = Math.pow(ridge, 3);
-    const i = (y * S + x) * 4; px[i] = 225; px[i + 1] = 245; px[i + 2] = 255; px[i + 3] = Math.round(a * 255);
-  }
-  c2.putImageData(img, 0, 0);
-  CAUSTIC = cv; return cv;
-}
 
 /**
  * One renderer per game canvas. `ui` connects it to game.js:
@@ -98,71 +68,10 @@ export function createRenderer(canvas, ui) {
 
   // ---- Rendering ----------------------------------------------------------
   let waveT = 0;
-  let causticPat = null; // water caustics pattern, created on first draw
+  const water = createWater(canvas, CW, CH);
+  let glWater = false; // this frame's water came from the GPU layer: skip the 2D shadows/ripples/wakes it draws
   function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
   function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
-  function drawWater(w, h, t) {
-    const shore = shoreY({ w, h });
-    // depth: sky-tinted far edge -> deep blue -> clearer teal shallows by the beach
-    const g = ctx.createLinearGradient(0, 0, 0, shore);
-    g.addColorStop(0, "#2b7fa4"); g.addColorStop(0.16, "#17688b"); g.addColorStop(0.55, "#0f4f72"); g.addColorStop(0.88, "#146384"); g.addColorStop(1, "#2c8ba6");
-    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    // refracted sunlight: scrolling caustic layers (one when the water is crowded)
-    if (!causticPat) causticPat = ctx.createPattern(causticTile(), "repeat");
-    const layers = lowFx ? [[1.7, 0.12, 9, 6]] : [[1.7, 0.11, 9, 6], [0.95, 0.07, -13, 4]];
-    ctx.save(); ctx.globalCompositeOperation = "screen";
-    for (const [s, op, vx, vy] of layers) {
-      const ox = (t * vx) % (256 * s), oy = (t * vy) % (256 * s);
-      ctx.save(); ctx.globalAlpha = op; ctx.translate(ox, oy); ctx.scale(s, s); ctx.fillStyle = causticPat;
-      ctx.fillRect(-ox / s - 256, -oy / s - 256, w / s + 512, h / s + 512); ctx.restore();
-    }
-    ctx.restore();
-    // sky reflection along the far edge
-    const sky = ctx.createLinearGradient(0, 0, 0, h * 0.2);
-    sky.addColorStop(0, "rgba(195,228,246,0.22)"); sky.addColorStop(1, "rgba(195,228,246,0)");
-    ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h * 0.2);
-    // sun patch with twinkling glitter
-    const gx = w * 0.62 + Math.sin(t * 0.21) * w * 0.14, gy = h * 0.3 + Math.cos(t * 0.16) * h * 0.08, grd = Math.min(w, h) * 0.55;
-    const sun = ctx.createRadialGradient(gx, gy, 0, gx, gy, grd);
-    sun.addColorStop(0, "rgba(220,240,255,0.16)"); sun.addColorStop(0.45, "rgba(220,240,255,0.05)"); sun.addColorStop(1, "rgba(220,240,255,0)");
-    ctx.fillStyle = sun; ctx.fillRect(gx - grd, gy - grd, grd * 2, grd * 2);
-    if (!lowFx) {
-      ctx.fillStyle = "#ffffff";
-      for (let i = 0; i < 70; i++) {
-        const a = i * 2.399, rr = Math.sqrt((i + 0.5) / 70) * grd * 0.8;
-        const sx = gx + Math.cos(a) * rr, sy = gy + Math.sin(a) * rr * 0.6;
-        const tw = Math.sin(t * (2.2 + (i % 5) * 0.4) + i * 1.7);
-        if (tw > 0.55) { ctx.globalAlpha = (tw - 0.55) * 1.6 * (1 - rr / (grd * 0.8)); ctx.beginPath(); ctx.ellipse(sx, sy, 3.2, 1.1, 0, 0, Math.PI * 2); ctx.fill(); }
-      }
-      ctx.globalAlpha = 1;
-    }
-    // swell: rows of crests whose height breathes along x; shadowed trough, lit crest, foam flecks
-    ctx.save(); ctx.lineCap = "round";
-    const rows = Math.max(5, Math.round(shore / 82));
-    for (let row = 0; row < rows; row++) {
-      // uneven spacing and strength so the swell doesn't read as ruled lines
-      const y0 = (row + 0.55 + 0.25 * Math.sin(row * 2.3)) * (shore / rows), ph = row * 1.7, sp = 0.7 + (row % 3) * 0.25, str = (0.7 + 0.3 * Math.sin(row * 1.3 + 0.5)) * (0.55 + 0.45 * (row + 1) / rows); // fainter far away
-      const crest = (x) => Math.sin(x * 0.014 + t * sp + ph) * 7 * (0.55 + 0.45 * Math.sin(x * 0.004 + t * 0.3 + row));
-      const path = (dy) => { ctx.beginPath(); for (let x = -10; x <= w + 10; x += 16) { const y = y0 + dy + crest(x); x === -10 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } };
-      ctx.strokeStyle = `rgba(4,28,48,${0.16 * str})`; ctx.lineWidth = 5; path(4); ctx.stroke();
-      ctx.strokeStyle = `rgba(190,230,250,${0.18 * str})`; ctx.lineWidth = 1.8; path(0); ctx.stroke();
-      if (!lowFx && row % 3 === 1) { // a few foam flecks, only on some crests
-        ctx.setLineDash([2, 34, 3, 61]); ctx.lineDashOffset = -t * 26 - row * 7;
-        ctx.strokeStyle = "rgba(255,255,255,0.42)"; ctx.lineWidth = 1.8; path(-1); ctx.stroke(); ctx.setLineDash([]);
-      }
-    }
-    ctx.restore();
-    // shallows: sand showing through, with ripple lines on the bottom
-    const sh = ctx.createLinearGradient(0, shore - 90, 0, shore);
-    sh.addColorStop(0, "rgba(214,190,140,0)"); sh.addColorStop(1, "rgba(214,190,140,0.36)");
-    ctx.fillStyle = sh; ctx.fillRect(0, shore - 90, w, 90);
-    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1;
-    for (let k = 0; k < 4; k++) { const yy = shore - 14 - k * 16; ctx.beginPath(); for (let x = 0; x <= w; x += 12) { const y = yy + Math.sin(x * 0.09 + t * 1.2 + k) * 2; x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke(); }
-    // soft depth vignette
-    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.78);
-    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.22)");
-    ctx.fillStyle = vg; ctx.fillRect(0, 0, w, h);
-  }
   function drawShore(w, h) {
     const y0 = shoreY({ w, h });
     const g = ctx.createLinearGradient(0, y0, 0, h);
@@ -319,12 +228,35 @@ export function createRenderer(canvas, ui) {
     const nPost = Math.max(2, Math.round(L / 110)), pr = T * 0.22;
     const posts = [];
     for (let i = 0; i < nPost; i++) { const a = (i + 0.5) / nPost; for (const side of [-1, 1]) posts.push(horiz ? [o.x + a * L, o.y + o.h / 2 + side * (T / 2 + pr * 0.35)] : [o.x + o.w / 2 + side * (T / 2 + pr * 0.35), o.y + a * L]); }
-    // shadow and wet reflection under the deck
-    ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 5, o.y + 9, o.w, o.h, 3); ctx.fill();
-    ctx.fillStyle = "rgba(0,10,20,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 4, o.y + o.h - 2, o.w + 8, 14, 4); ctx.fill();
-    for (const [px, py] of posts) {
-      ctx.fillStyle = "rgba(0,10,20,0.25)"; ctx.beginPath(); ctx.ellipse(px + 2, py + 5, pr * 1.3, pr * 0.8, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(220,240,250,0.28)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.ellipse(px, py + 3, pr * 1.7, pr * 0.9, 0, 0, Math.PI * 2); ctx.stroke();
+    // shadow on the water (away from the light), warm reflection, foam lapping at the edge
+    // (the GPU water draws these itself)
+    if (!glWater) {
+      ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 10, o.w, o.h, 3); ctx.fill();
+      ctx.fillStyle = "rgba(90,60,30,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 6, o.y - 6, o.w + 12, o.h + 12, 8); ctx.fill();
+      // short pieces of foam along the edges that come and go
+      ctx.strokeStyle = "#eef8ff"; ctx.lineWidth = 1.8; ctx.lineCap = "round";
+      const per = 2 * (o.w + o.h), n = Math.round(per / 15);
+      for (let i = 0; i < n; i++) {
+        const life = 0.5 + 0.5 * Math.sin(waveT * (0.8 + rnd(i + 300)) + i * 2.1);
+        if (life < 0.35) continue;
+        const s = (i + rnd(i + 400) * 0.6) / n * per, len = 5 + rnd(i + 500) * 9, off = 1.5 + rnd(i + 600) * 2.5;
+        let x0, y0, dx = 0, dy = 0;
+        if (s < o.w) { x0 = o.x + s; y0 = o.y - off; dx = 1; }
+        else if (s < o.w + o.h) { x0 = o.x + o.w + off; y0 = o.y + s - o.w; dy = 1; }
+        else if (s < 2 * o.w + o.h) { x0 = o.x + o.w - (s - o.w - o.h); y0 = o.y + o.h + off; dx = -1; }
+        else { x0 = o.x - off; y0 = o.y + o.h - (s - 2 * o.w - o.h); dy = -1; }
+        ctx.globalAlpha = Math.min(1, (life - 0.35) * 1.6) * 0.65;
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0 + dx * len, y0 + dy * len); ctx.stroke();
+      }
+      ctx.globalAlpha = 1; ctx.lineCap = "butt";
+    }
+    // pilings: shadow, a churning foam collar and a ripple spreading from each
+    for (let i = 0; i < posts.length; i++) {
+      const [px, py] = posts[i], rp = (waveT * 0.5 + i * 0.37) % 1;
+      ctx.fillStyle = "rgba(0,10,20,0.28)"; ctx.beginPath(); ctx.ellipse(px + pr * 0.45, py + pr * 0.6, pr * 1.25, pr * 1.0, 0, 0, Math.PI * 2); ctx.fill();
+      if (!lowFx) { ctx.strokeStyle = `rgba(225,244,252,${0.4 * (1 - rp)})`; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(px, py, pr * (1.3 + rp * 1.4), 0, Math.PI * 2); ctx.stroke(); }
+      ctx.strokeStyle = "rgba(240,250,255,0.7)"; ctx.lineWidth = 1.8; ctx.setLineDash([pr * 0.9, pr * 0.45]); ctx.lineDashOffset = -waveT * 6 - i * 3;
+      ctx.beginPath(); ctx.arc(px, py, pr * 1.18, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = "#3d2612"; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
     }
     // deck: planks laid across the dock — mixed wood tones and grey weathered boards, the odd one missing or cracked
@@ -380,40 +312,58 @@ export function createRenderer(canvas, ui) {
       ctx.stroke(); ctx.lineCap = "butt";
     }
   }
+  // 2D fallback of the GPU whirlpool: a dark funnel, tapered foam arms turning
+  // the way the sim pulls (counter-clockwise on screen), a churning rim, a black core.
   function drawWhirl(z) {
     const t = waveT, R = z.r;
     ctx.save(); ctx.translate(z.x, z.y);
-    // the surface dips toward the hole: darker, deeper blue inward
-    const g = ctx.createRadialGradient(0, 0, R * 0.05, 0, 0, R);
-    g.addColorStop(0, "rgba(3,18,34,0.85)"); g.addColorStop(0.25, "rgba(8,40,66,0.55)"); g.addColorStop(0.7, "rgba(20,80,110,0.18)"); g.addColorStop(1, "rgba(30,100,130,0)");
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();
-    // spiral arms of foam winding inward
-    const arms = lowFx ? 2 : 4;
-    ctx.lineCap = "round";
+    const g = ctx.createRadialGradient(0, 0, R * 0.05, 0, 0, R * 1.08);
+    g.addColorStop(0, "rgba(2,10,18,0.95)"); g.addColorStop(0.16, "rgba(4,22,40,0.86)"); g.addColorStop(0.45, "rgba(6,38,62,0.55)"); g.addColorStop(0.8, "rgba(12,62,92,0.2)"); g.addColorStop(1, "rgba(20,80,110,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 1.08, 0, Math.PI * 2); ctx.fill();
+    // arms: angle = a0 + 1.75 ln(d/R) - 1.5 t (the shader's spiral), width tapering inward
+    const arms = lowFx ? 2 : 4, N = 28;
     for (let a = 0; a < arms; a++) {
+      const a0 = a * Math.PI * 2 / arms - 1.5 * t, side = [];
+      for (let k = 0; k <= N; k++) {
+        const d = R * (0.95 - 0.77 * k / N), ang = a0 + 1.75 * Math.log(d / R), hw = (0.4 + 2.9 * (d - R * 0.15) / (R * 0.8)) / d;
+        side.push([d, ang, hw]);
+      }
       ctx.beginPath();
-      for (let k = 0; k <= 40; k++) { const f = k / 40, rad = R * (0.12 + 0.88 * (1 - f)), ang = a * (Math.PI * 2 / arms) + t * 1.6 + f * 4.2; const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad * 0.92; k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
-      ctx.strokeStyle = "rgba(230,245,255,0.26)"; ctx.lineWidth = 3.5; ctx.stroke();
-      ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.2; ctx.stroke();
+      side.forEach(([d, ang, hw], i) => { const x = Math.cos(ang + hw) * d, y = Math.sin(ang + hw) * d; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      for (let i = side.length - 1; i >= 0; i--) { const [d, ang, hw] = side[i]; ctx.lineTo(Math.cos(ang - hw) * d, Math.sin(ang - hw) * d); }
+      ctx.closePath(); ctx.fillStyle = "rgba(235,247,255,0.72)"; ctx.fill();
+      ctx.strokeStyle = "rgba(235,247,255,0.18)"; ctx.lineWidth = 5; ctx.lineJoin = "round"; ctx.stroke();
     }
-    // broken foam ring at the edge, dark core with a lit rim, droplets flung around
-    ctx.setLineDash([14, 22]); ctx.lineDashOffset = -t * 40; ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.96, R * 0.9, 0, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = "#03111f"; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.14, R * 0.11, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(200,235,255,0.6)"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(0, 0, R * 0.16, R * 0.13, 0, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
-    if (!lowFx) { ctx.fillStyle = "rgba(230,245,255,0.7)"; for (let i = 0; i < 6; i++) { const ang = t * 2.2 + i * 1.05; ctx.beginPath(); ctx.arc(Math.cos(ang) * R * 1.02, Math.sin(ang) * R * 0.95, 1.6, 0, Math.PI * 2); ctx.fill(); } }
+    // churning rim, black core with a lit lip on the light side
+    ctx.setLineDash([16, 12, 6, 18]); ctx.lineDashOffset = t * 30; ctx.strokeStyle = "rgba(240,250,255,0.6)"; ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.97, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "#020b14"; ctx.beginPath(); ctx.arc(0, 0, R * 0.15, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(195,230,248,0.75)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, R * 0.17, Math.PI * 0.95, Math.PI * 1.75); ctx.stroke();
+    if (!lowFx) { ctx.fillStyle = "rgba(230,245,255,0.75)"; for (let i = 0; i < 6; i++) { const ang = -t * 1.5 + i * 1.05; ctx.beginPath(); ctx.arc(Math.cos(ang) * R * 1.02, Math.sin(ang) * R * 1.02, 1.6, 0, Math.PI * 2); ctx.fill(); } }
     ctx.restore(); ctx.lineCap = "butt";
+  }
+  // One light for the whole scene: warm sun from the top left, a cool fall-off toward the bottom right.
+  function drawLightGrade(w, h) {
+    const g = ctx.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, "rgba(255,226,170,0.08)"); g.addColorStop(0.42, "rgba(255,226,170,0)"); g.addColorStop(0.68, "rgba(8,28,58,0)"); g.addColorStop(1, "rgba(8,28,58,0.12)");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
   }
   function drawLivboj(x, y, r, hue, glow, label, you, stunned) {
     const bob = Math.sin(waveT * 2.1 + x * 0.03) * 1.5, tilt = 1 - 0.03 * (0.5 + 0.5 * Math.sin(waveT * 1.4 + y * 0.02));
     ctx.save(); ctx.translate(x, y);
-    // water contact: soft shadow under the ring and a ripple wake
-    if (!lowFx) {
-      ctx.fillStyle = "rgba(3,20,36,0.32)"; ctx.beginPath(); ctx.ellipse(r * 0.12, r * 0.22 + bob * 0.3, r * 1.02, r * 0.78, 0, 0, Math.PI * 2); ctx.fill();
-      const rip = (waveT * 0.9 + x * 0.01) % 1;
-      for (let k = 0; k < 2; k++) {
-        const f = (rip + k * 0.5) % 1;
-        ctx.strokeStyle = `rgba(200,235,255,${(1 - f) * (glow ? 0.5 : 0.28)})`; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.ellipse(0, r * 0.18, r * (1.12 + f * 0.75), r * (0.75 + f * 0.55), 0, 0, Math.PI * 2); ctx.stroke();
+    // water contact: soft shadow away from the light, foam hugging the tube, ripples
+    // (the GPU water draws these itself, with a wake)
+    if (!glWater) {
+      ctx.fillStyle = "rgba(3,20,36,0.3)"; ctx.beginPath(); ctx.ellipse(r * 0.16, r * 0.26 + bob, r * 1.06, r * 0.98, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(235,248,255,0.55)"; ctx.lineWidth = 2.2; ctx.setLineDash([r * 0.55, r * 0.2, r * 0.25, r * 0.3]); ctx.lineDashOffset = -waveT * 10 - x * 0.1;
+      ctx.beginPath(); ctx.ellipse(0, bob, r * 1.05, r * 1.02, 0, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      if (!lowFx) {
+        const rip = (waveT * 0.9 + x * 0.01) % 1;
+        for (let k = 0; k < 2; k++) {
+          const f = (rip + k * 0.5) % 1;
+          ctx.strokeStyle = `rgba(215,240,255,${(1 - f) * (glow ? 0.5 : 0.3)})`; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.ellipse(0, bob, r * (1.12 + f * 0.8), r * (1.08 + f * 0.75), 0, 0, Math.PI * 2); ctx.stroke();
+        }
       }
     }
     ctx.translate(0, bob); ctx.scale(1, tilt);
@@ -493,20 +443,22 @@ export function createRenderer(canvas, ui) {
 
     ctx.save(); ctx.translate(s.x, s.y + bob * 2.6); ctx.rotate(bob * 0.06);
 
-    // ambient occlusion / soft cast shadow into the water
-    if (lowFx) { ctx.fillStyle = "rgba(0,18,32,0.2)"; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.3, R * 0.8, 0, 0, Math.PI * 2); ctx.fill(); }
-    else { const ao = ctx.createRadialGradient(0, R * 0.55, R * 0.2, 0, R * 0.55, R * 1.7); ao.addColorStop(0, "rgba(0,18,32,0.3)"); ao.addColorStop(1, "rgba(0,18,32,0)"); ctx.fillStyle = ao; ctx.beginPath(); ctx.ellipse(0, R * 0.55, R * 1.55, R * 0.92, 0, 0, Math.PI * 2); ctx.fill(); }
-
-    // ripples
-    for (let k = 0; k < 3; k++) {
-      const rp = ((t * 0.3 + ph + k * 0.4) % 1 + 1) % 1;
-      ctx.strokeStyle = `rgba(205,232,246,${0.24 * (1 - rp)})`; ctx.lineWidth = 1.4;
-      ctx.beginPath(); ctx.ellipse(0, 7, R * (1.0 + rp * 1.8), R * (0.5 + rp * 0.9), 0, 0, Math.PI * 2); ctx.stroke();
+    if (!glWater) { // (the GPU water draws the shadow, foam and ripples itself)
+      // soft cast shadow into the water, away from the light (top left)
+      if (lowFx) { ctx.fillStyle = "rgba(0,18,32,0.2)"; ctx.beginPath(); ctx.ellipse(R * 0.25, R * 0.8, R * 1.2, R * 0.85, 0, 0, Math.PI * 2); ctx.fill(); }
+      else { const ao = ctx.createRadialGradient(R * 0.25, R * 0.8, R * 0.2, R * 0.25, R * 0.8, R * 1.5); ao.addColorStop(0, "rgba(0,18,32,0.34)"); ao.addColorStop(1, "rgba(0,18,32,0)"); ctx.fillStyle = ao; ctx.beginPath(); ctx.ellipse(R * 0.25, R * 0.8, R * 1.45, R * 1.0, 0, 0, Math.PI * 2); ctx.fill(); }
+      // ripples
+      for (let k = 0; k < (lowFx ? 1 : 2); k++) {
+        const rp = ((t * 0.3 + ph + k * 0.5) % 1 + 1) % 1;
+        ctx.strokeStyle = `rgba(225,244,252,${0.32 * (1 - rp)})`; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.ellipse(0, R * 0.62, R * (0.95 + rp * 1.4), R * (0.62 + rp * 0.9), 0, 0, Math.PI * 2); ctx.stroke();
+      }
     }
-    // sink-time gauge: faint track, soft glow, crisp arc, bright tip
+    // sink-time gauge: dark backing (reads on bright water too), soft glow, crisp arc, bright tip
     const hue = 120 * frac, a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * frac, gr = R + 10;
     ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(2,22,38,0.38)"; ctx.lineWidth = 4.6; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
     ctx.strokeStyle = `hsla(${hue},85%,60%,0.22)`; ctx.lineWidth = 7; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
     ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
     ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
@@ -618,7 +570,14 @@ export function createRenderer(canvas, ui) {
     m.face = m.face === undefined ? faceWant : m.face + (faceWant - m.face) * 0.1;
     const pitch = -Math.sin(m.dir || 0) * 0.3 * Math.sign(m.face || 1), bob = Math.sin(t) * 2 + sub * R * 0.5;
     ctx.save(); ctx.translate(m.x, m.y);
-    if (sub > 0.15) { // surface disturbance where it went under
+    if (!glWater) { // (the GPU water draws the shadow, the shape under the surface and the wake itself)
+      const by = Math.sin(t) * 2 + sub * R * 0.5, fc = m.face || 1;
+      const mao = ctx.createRadialGradient(R * 0.2, by + R * 0.68, R * 0.3, R * 0.2, by + R * 0.68, R * 1.9);
+      mao.addColorStop(0, `rgba(0,18,32,${0.32 * (1 - sub)})`); mao.addColorStop(1, "rgba(0,18,32,0)");
+      ctx.fillStyle = mao; ctx.beginPath(); ctx.ellipse(R * 0.2, by + R * 0.68, R * 1.8, R * 0.9, 0, 0, Math.PI * 2); ctx.fill();
+      if (sub > 0.05) { ctx.fillStyle = `rgba(3,26,40,${0.5 * sub})`; ctx.beginPath(); ctx.ellipse(-R * 0.25 * fc, by + R * 0.3, R * 1.7, R * 0.75, 0, 0, Math.PI * 2); ctx.fill(); }
+    }
+    if (sub > 0.15 && !glWater) { // surface disturbance where it went under
       ctx.strokeStyle = `rgba(220,242,250,${0.4 * sub})`; ctx.lineWidth = 2;
       for (let k = 0; k < 3; k++) { const f = ((t * 0.35 + k / 3) % 1); ctx.globalAlpha = (1 - f) * sub; ctx.beginPath(); ctx.ellipse(0, R * 0.3, R * (0.6 + f * 1.6), R * (0.25 + f * 0.7), 0, 0, Math.PI * 2); ctx.stroke(); }
       ctx.globalAlpha = sub; ctx.fillStyle = "rgba(222,242,250,0.6)"; for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.arc(Math.sin(t * 1.3 + k * 2) * R * 0.8, R * 0.25 + Math.cos(t * 0.9 + k) * R * 0.3, 1.5 + (k % 2), 0, Math.PI * 2); ctx.fill(); }
@@ -628,13 +587,13 @@ export function createRenderer(canvas, ui) {
     const dark = "#1f4f2b", mid = "#3f8f4a", light = "#6cc276", belly = "#bfd98f";
     const body = ctx.createRadialGradient(-R * 0.35, -R * 0.35, R * 0.2, -R * 0.15, 0, R * 1.7);
     body.addColorStop(0, light); body.addColorStop(0.5, mid); body.addColorStop(1, "#245f35");
-    // ambient occlusion + wake (a V of foam trailing behind, drifting bubbles)
-    const mao = ctx.createRadialGradient(-R * 0.2, R * 0.5, R * 0.3, -R * 0.2, R * 0.5, R * 2.2);
-    mao.addColorStop(0, "rgba(0,18,32,0.3)"); mao.addColorStop(1, "rgba(0,18,32,0)");
-    ctx.fillStyle = mao; ctx.beginPath(); ctx.ellipse(-R * 0.2, R * 0.55, R * 2.0, R * 0.95, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(220,242,250,0.35)"; ctx.lineWidth = 2; ctx.lineCap = "round";
-    ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, R * 0.9, -R * 2.9, R * 1.05 + Math.sin(t * 2) * 3); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, -R * 0.2, -R * 2.9, -R * 0.35 + Math.sin(t * 2 + 1) * 3); ctx.stroke();
+    // wake (a V of foam trailing behind; the GPU water draws its own) and drifting bubbles
+    ctx.lineCap = "round";
+    if (!glWater) {
+      ctx.strokeStyle = "rgba(220,242,250,0.35)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, R * 0.9, -R * 2.9, R * 1.05 + Math.sin(t * 2) * 3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(R * 0.6, R * 0.3); ctx.quadraticCurveTo(-R * 1.2, -R * 0.2, -R * 2.9, -R * 0.35 + Math.sin(t * 2 + 1) * 3); ctx.stroke();
+    }
     ctx.fillStyle = "rgba(222,242,250,0.45)";
     for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(-R * 1.5 - i * R * 0.4, R * 0.45 + Math.sin(t * 2 + i) * 4, 3 - i * 0.45, 0, Math.PI * 2); ctx.fill(); }
     // waterline ring where the body breaks the surface
@@ -731,25 +690,30 @@ export function createRenderer(canvas, ui) {
 
   function render() {
     ({ authoritative, selfId, usingTouch, muted, quitArmedUntil, levelStartScore, saved } = ui.live());
-    resetBase(); ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH);
+    resetBase();
     const v = ui.view();
+    const inGame = !!v && v.phase !== Phase.LOBBY;
+    const f = inGame ? fit(v.world.w, v.world.h) : null;
+    if (inGame) lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
+    // the GPU water layer under this canvas (false: no GPU water this frame -> 2D water)
+    glWater = inGame && water.draw({ v, f, t: waveT, lowFx, saved, selfId, selfDash: selfPos.dashActive > 0, SHORE_H, playing: v.phase === Phase.PLAY });
+    if (glWater) ctx.clearRect(0, 0, CW, CH); else { ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH); }
     if (!v) { drawWaitScreen("Ansluter…"); return; }
     if (v.phase === Phase.LOBBY) { drawLobbyScreen(v); return; }
-    const f = fit(v.world.w, v.world.h);
     ctx.setTransform(backK * f.s, 0, 0, backK * f.s, backK * f.ox, backK * f.oy);
-    drawWater(v.world.w, v.world.h, waveT);
+    if (!glWater) drawWater2D(ctx, v.world.w, v.world.h, shoreY(v.world), waveT, lowFx, backK * f.s);
     for (const z of v.swamps || []) drawSwamp(z);
-    for (const z of v.whirls || []) drawWhirl(z);
+    if (!glWater) for (const z of v.whirls || []) drawWhirl(z);
     drawShore(v.world.w, v.world.h);
     drawScenery(v.world.w, v.world.h);
     for (const o of v.obstacles) drawBrygga(o);
-    lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
     for (const s of v.swimmers) drawSwimmer(s);
     for (const m of v.monsters || []) drawMonster(m);
     for (const sv of saved) drawSaved(sv);
     if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
     drawSeagulls(v.world.w, waveT);
+    drawLightGrade(v.world.w, v.world.h);
     resetBase();
     drawHUD(v); drawScoreboard(v); drawOverlays(v); drawQuitBtn(v); drawMute();
   }
@@ -899,7 +863,7 @@ export function createRenderer(canvas, ui) {
   }
 
   return {
-    CW, CH, DASH_BTN, MUTE_BTN, QUIT_BTN, fit, toWorld, fitBacking, render,
+    CW, CH, DASH_BTN, MUTE_BTN, QUIT_BTN, fit, toWorld, fitBacking, render, water,
     actionBtn: () => ACTION_BTN, leaveBtn: () => LEAVE_BTN,
     // start of a frame: advance the animation clock; only the screens drawn this frame may be clickable
     beginFrame(dt) { waveT += dt; ACTION_BTN = null; LEAVE_BTN = null; fitBacking(); },

@@ -659,6 +659,7 @@ export function createGame(canvas, opts) {
     hostStart, getRoom: () => opts.room, relay: () => (room && room.stats ? room.stats() : null), roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
     board: () => ({ source: boardSource, entries: board.slice(0, BOARD_SHOW) }),
     signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
+    water: () => R.water.info(), _waterStepDown: () => R.water._stepDown(), // tests: the water layer's mode / quality ladder
     _jump: (idx) => { if (authoritative) { S.levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(S.levelIndex); S.phase = Phase.PLAY; emitPhase(); pushState(); } },
     debug: () => ({
       authoritative, promoted,

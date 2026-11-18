@@ -18,7 +18,7 @@ const CHECK_MS = 60 * 1000;
 // Every module file the game loads (game.js imports the others with its own
 // ?v=). A new module file must be added here, or a change to it alone would
 // not change the build.
-export const MODULES = ["game.js", "sim.js", "render.js", "net.js"];
+export const MODULES = ["game.js", "sim.js", "render.js", "net.js", "water.js"];
 
 async function etagOf(file) {
   const r = await fetch(`${file}?_=${Date.now()}`, { method: "HEAD", cache: "no-store" });

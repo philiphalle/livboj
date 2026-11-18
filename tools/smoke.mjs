@@ -3,7 +3,7 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,keys,board,cache,menu,forslag,live
+//   node tools/smoke.mjs --only layout,fullscreen,water,keys,board,cache,menu,forslag,live
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
@@ -190,6 +190,82 @@ if (want("fullscreen")) {
   ok(await page.evaluate(() => !document.fullscreenElement && document.getElementById("probe").value === "f"), "F typed into a textarea during play: no fullscreen");
   ok(!errors.length, "no console/page errors", errors.join(" | "));
   await context.close();
+}
+
+// ---------------------------------------------------------------- water layer
+// The GPU water is a second canvas under the game canvas (water.js). Both must
+// cover exactly the same box at every size and in fullscreen; ?water=2d and a
+// lost WebGL context must leave the game running on the 2D water, no errors.
+if (want("water")) {
+  console.log("water");
+  const boxes = (page) => page.evaluate(() => {
+    const g = document.getElementById("game"), w = document.querySelector("#stage canvas.water");
+    const b = (el) => { const r = el.getBoundingClientRect(), cs = getComputedStyle(el); return { x: r.x, y: r.y, w: r.width, h: r.height, rad: cs.borderTopLeftRadius, shadow: cs.boxShadow, disp: cs.display }; };
+    return { g: b(g), w: w ? b(w) : null, nWater: document.querySelectorAll("canvas.water").length, gBg: getComputedStyle(g).backgroundColor, info: window.livboj.water() };
+  });
+  const same = (a, b) => !!a && !!b && ["x", "y", "w", "h"].every((k) => Math.abs(a[k] - b[k]) < 0.01) && a.rad === b.rad;
+  for (const s of [{ w: 1920, h: 1080, dsf: 2 }, { w: 844, h: 390, dsf: 3, touch: true }, { w: 390, h: 844, dsf: 3, touch: true }]) {
+    for (const q of ["", "water=2d"]) {
+      const tag = `${s.w}x${s.h}${s.touch ? " touch" : ""} ${q || "default"}`;
+      const { context, page, errors } = await newPage(s);
+      await openMenu(page, q); await startSolo(page); await waitPlay(page); await sleep(800);
+      const m = await boxes(page);
+      if (q) ok(m.info.mode === "2d" && (!m.w || m.w.disp === "none"), `${tag}: 2D water, no GPU layer shown`, JSON.stringify(m.info));
+      else {
+        ok(m.nWater <= 1, `${tag}: at most one water canvas`);
+        if (m.info.mode === "gl") {
+          ok(same(m.g, m.w), `${tag}: water canvas and game canvas overlap exactly`, `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
+          ok(m.gBg === "rgba(0, 0, 0, 0)" && m.g.shadow === "none" && m.w.shadow !== "none", `${tag}: game canvas transparent, the shadow is drawn once (by the layer)`, `${m.gBg} / ${m.g.shadow}`);
+        } else ok(true, `${tag}: no WebGL here, 2D water`, JSON.stringify(m.info));
+      }
+      const frames = await page.evaluate(() => new Promise((r) => { let n = 0; const f = () => (++n < 20 ? requestAnimationFrame(f) : r(n)); requestAnimationFrame(f); }));
+      ok(frames === 20 && (await page.evaluate(() => window.livboj.debug().phase)) === "play", `${tag}: game runs`);
+      ok(!errors.length, `${tag}: no console/page errors`, errors.join(" | "));
+      await context.close();
+    }
+  }
+  { // fullscreen + a lost WebGL context mid-game + the quality ladder
+    const { context, page, errors } = await newPage({ w: 1366, h: 768 });
+    await openMenu(page, "water=gl"); await startSolo(page); await waitPlay(page); await sleep(500);
+    await page.click("#fsBtn");
+    await page.waitForFunction(() => document.documentElement.classList.contains("is-fs"), null, { timeout: 3000 }).catch(() => {});
+    await sleep(300);
+    let m = await boxes(page);
+    ok(m.info.mode === "gl" && same(m.g, m.w) && m.w.rad === "0px" && m.w.shadow === "none", "fullscreen: water canvas and game canvas overlap exactly, square corners, no shadow", `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
+    await page.keyboard.press("f"); await sleep(300);
+    m = await boxes(page);
+    ok(same(m.g, m.w), "after leaving fullscreen: still the same box", `${JSON.stringify(m.g)} vs ${JSON.stringify(m.w)}`);
+    // share of opaque pixels on the game canvas over the water (a 12x8 grid above the beach; sprites cover a few)
+    const opaque = () => page.evaluate(() => { const c = document.getElementById("game"), x = c.getContext("2d"); let n = 0, k = 0;
+      for (let i = 0; i < 12; i++) for (let j = 0; j < 8; j++) { k++; if (x.getImageData(Math.round(c.width * (i + 0.5) / 12), Math.round(c.height * (0.15 + 0.6 * (j + 0.5) / 8)), 1, 1).data[3] === 255) n++; } return n / k; });
+    let op = await opaque();
+    ok(op < 0.3, "GPU water: the game canvas is see-through over the water", `${(op * 100).toFixed(0)}% opaque`);
+    await page.evaluate(() => document.querySelector("canvas.water").getContext("webgl").getExtension("WEBGL_lose_context").loseContext());
+    await sleep(600);
+    m = await boxes(page);
+    ok(m.info.mode === "2d" && m.w.disp === "none" && m.gBg !== "rgba(0, 0, 0, 0)", "context lost while visible: 2D water, layer hidden, canvas opaque again", JSON.stringify(m.info));
+    op = await opaque();
+    ok(op === 1, "after the loss the 2D canvas paints the water", `${(op * 100).toFixed(0)}% opaque`);
+    ok((await page.evaluate(() => window.livboj.debug().phase)) === "play", "the game keeps running after the loss");
+    ok(!errors.length, "no console/page errors (fullscreen, context loss)", errors.join(" | "));
+    await context.close();
+  }
+  { // quality ladder: steps down only, ends in 2D, is remembered
+    const { context, page, errors } = await newPage({ w: 1366, h: 768 });
+    await openMenu(page); await startSolo(page); await waitPlay(page);
+    const start = await page.evaluate(() => window.livboj.water());
+    if (start.mode === "gl") {
+      const steps = [];
+      for (let i = 0; i < 3; i++) { await page.evaluate(() => window.livboj._waterStepDown()); await sleep(250); steps.push(await page.evaluate(() => { const w = window.livboj.water(); return `${w.level}:${w.mode}:${w.size.join("x")}`; })); }
+      ok(/^1:gl/.test(steps[0]) && /^2:gl/.test(steps[1]) && /^3:2d/.test(steps[2]), "ladder: lower resolution -> cheaper shader -> 2D", steps.join("  "));
+      await openMenu(page); await startSolo(page); await waitPlay(page);
+      ok((await page.evaluate(() => window.livboj.water().mode)) === "2d", "ladder: the step down is remembered on the next load");
+      await openMenu(page, "water=gl"); await startSolo(page); await waitPlay(page);
+      ok((await page.evaluate(() => window.livboj.water().mode)) === "gl", "?water=gl overrides the remembered level");
+    } else ok(true, "ladder: no WebGL here (skipped)");
+    ok(!errors.length, "no console/page errors (ladder)", errors.join(" | "));
+    await context.close();
+  }
 }
 
 // ---------------------------------------------------------------- held keys
