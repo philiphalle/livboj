@@ -247,6 +247,19 @@ function flushBoardQueue() {
   })().finally(() => { flushing = null; });
   return flushing;
 }
+// Förslagslåda: one suggestion to the relay (POST /forslag). -> "ok" | "slow" (throttled) | "error"
+// (any other answer, e.g. a 404 from a relay without the endpoint, is "error": the page keeps the text)
+export async function postForslag(text, name) {
+  if (!RELAY_HTTP) return "error";
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(`${RELAY_HTTP}/forslag`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: String(text || "").slice(0, 500), name: String(name || "").slice(0, 14) }), signal: ctl.signal });
+    if (r.status === 429) return "slow";
+    if (!r.ok) return "error";
+    const d = await r.json().catch(() => null);
+    return d && d.ok ? "ok" : "error";
+  } catch { return "error"; } finally { clearTimeout(t); }
+}
 // whatever an earlier page load could not deliver
 flushBoardQueue();
 addEventListener("online", () => { flushBoardQueue(); });

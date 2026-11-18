@@ -15,6 +15,7 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | `host.html` | Host page: create a lobby (room code + invite link), start the game, end it. |
 | `game.js` | Everything else: simulation, rendering (canvas, logical 900×600), input, networking, leaderboard client, page chrome (fullscreen, rotate hint, iOS fixes). |
 | `boot.js` | Loads `game.js?v=<its ETag>` and watches for new builds (see *Deploy*). |
+| `nyheter.json` | The news shown on the start page (see *Nyheter* below). |
 | `manifest.webmanifest`, `icons/`, `favicon.svg` | Add-to-home-screen / install (fullscreen on phones). No service worker. |
 | `relay/` | Cloudflare Worker: the WebSocket room relay and the global leaderboard (`relay/README.md`). |
 | `tools/` | Dev only: `smoke.mjs` (automated checks), `shot.mjs` (screenshots), `icons.mjs` (renders `icons/` from `favicon.svg`). |
@@ -58,6 +59,19 @@ localStorage queue first and leaves it only once the relay has taken it, so a re
 dead network: the queue is retried on the next page load and when the browser comes back online.
 The relay dedupes by entry id, so a re-sent result never shows twice.
 
+## Nyheter and the Förslagslåda
+
+The start page shows the latest five items of `nyheter.json` (fetched uncached, so a push shows
+up at once). To add a news item, put a new object **first** in the array and push:
+
+```json
+{ "date": "2026-12-01", "title": "Kort rubrik", "text": "En eller två meningar på enkel svenska, för spelarna." }
+```
+
+`date` is `YYYY-MM-DD` (shown as d/m). Text only — it is inserted as plain text, never as HTML.
+Below the news, the *Förslagslåda* sends a player's suggestion to the relay (`POST /forslag`);
+`relay/README.md` says how to read them.
+
 ## Deploy
 
 Push to `main` → GitHub Pages publishes the folder. GitHub Pages caches files for 10 minutes, so
@@ -75,5 +89,6 @@ The relay is deployed separately with `npx wrangler deploy` in `relay/` (see `re
 npm install                       # once: Playwright for the tools (or it is found in the npx cache)
 node tools/smoke.mjs              # layout, fullscreen, input, leaderboard queue (leaderboard always stubbed)
 node tools/smoke.mjs --live       # + host/join and forced reconnects through the live relay
+node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
 node tools/shot.mjs               # screenshots of menu + solo game at desktop and phone sizes -> shots/
 ```

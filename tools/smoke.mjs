@@ -3,7 +3,7 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,keys,board,menu,live
+//   node tools/smoke.mjs --only layout,fullscreen,keys,board,menu,forslag,live
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
@@ -323,6 +323,72 @@ if (want("live")) {
   console.log("        rosters:", JSON.stringify(await names()));
   ok(!H.errors.length && !J.errors.length, "no console/page errors on either page", [...H.errors, ...J.errors].join(" | "));
   await H.context.close(); await J.context.close();
+}
+
+// ---------------------------------------------------------------- Nyheter + Förslagslåda
+// Without --relay: /forslag is stubbed (404 = the relay before the endpoint was deployed, then 200).
+// With --relay ws://127.0.0.1:8787 (wrangler dev --local, ADMIN_KEY from relay/.dev.vars): end to end.
+if (want("forslag")) {
+  const local = /^ws:\/\/(127\.0\.0\.1|localhost)/.test(args.relay || "");
+  console.log("forslag" + (local ? ` (local relay ${args.relay})` : " (stubbed endpoint)"));
+  let stub = 404;
+  const { context, page, errors } = await newPage({ w: 1366, h: 768 });
+  if (!local) await context.route(/\/forslag(\?|$)/, (route) => route.fulfill(stub === 200
+    ? { status: 200, headers: { "access-control-allow-origin": "*", "content-type": "application/json" }, body: '{"ok":true}' }
+    : { status: 404, headers: { "access-control-allow-origin": "*" }, body: "livboj relay ok" }));
+  await openMenu(page);
+  const news = await page.evaluate(() => [...document.querySelectorAll("#news li")].map((li) => li.textContent));
+  ok(news.length === 5 && /^18\/11/.test(news[0]), "Nyheter: the latest five from nyheter.json, dated d/m", news[0] && news[0].slice(0, 40));
+  await page.fill("#name", "Fia");
+  await page.click("#forslag summary");
+  ok(await page.evaluate(() => document.getElementById("forslagSend").disabled), "Skicka disabled while the box is empty");
+  await page.click("#forslagText");
+  await page.keyboard.type("Fler nivåer med mmm och fff! ");
+  await page.keyboard.press("ArrowLeft"); await page.keyboard.press("ArrowRight");
+  const typed = await page.evaluate(() => ({ v: document.getElementById("forslagText").value, fs: !!document.fullscreenElement, count: document.getElementById("forslagCount").textContent, dis: document.getElementById("forslagSend").disabled }));
+  ok(typed.v === "Fler nivåer med mmm och fff! " && !typed.fs, "typing F, M, space and arrows in the box: plain text, no shortcuts", JSON.stringify(typed.v));
+  ok(typed.count === "29 / 500" && !typed.dis, "counter counts, Skicka enabled", typed.count);
+  ok(await page.evaluate(() => document.getElementById("forslagText").maxLength === 500), "the box takes at most 500 characters");
+  const text = `Smoke-förslag ${Date.now()}`;
+  await page.fill("#forslagText", text);
+  if (!local) {
+    await page.click("#forslagSend");
+    await page.waitForFunction(() => /Texten finns kvar/.test(document.getElementById("forslagStatus").textContent), null, { timeout: 10000 }).catch(() => {});
+    const st = await page.evaluate(() => ({ s: document.getElementById("forslagStatus").textContent, v: document.getElementById("forslagText").value, b: document.getElementById("forslagSend").textContent, d: document.getElementById("forslagSend").disabled }));
+    ok(/Det gick inte att skicka/.test(st.s) && st.v === text, "relay without the endpoint (404): failure message, the text is kept", st.s);
+    ok(st.d && /\(\d+ s\)/.test(st.b), "…and Skicka waits ~20 s before the next send", st.b);
+    stub = 200;
+    await openMenu(page); await page.click("#forslag summary"); await page.fill("#forslagText", text);
+  }
+  await page.click("#forslagSend");
+  await page.waitForFunction(() => /Tack|Det gick inte|Vänta/.test(document.getElementById("forslagStatus").textContent), null, { timeout: 10000 }).catch(() => {});
+  const done = await page.evaluate(() => ({ s: document.getElementById("forslagStatus").textContent, v: document.getElementById("forslagText").value, d: document.getElementById("forslagSend").disabled }));
+  ok(done.s === "Tack! Förslaget är skickat." && done.v === "" && done.d, "a real click sends it: thanks, box cleared, Skicka locked for a while", done.s);
+  if (local) {
+    const http = args.relay.replace(/^ws/, "http").replace(/\/$/, "");
+    const key = (await import("node:fs")).readFileSync(new URL("../relay/.dev.vars", import.meta.url), "utf8").match(/ADMIN_KEY=(\S+)/)[1];
+    const get = (q) => fetch(`${http}/forslag${q}`);
+    const r1 = await get(`?key=${encodeURIComponent(key)}`); const items = (await r1.json()).items || [];
+    ok(r1.status === 200 && items[0] && items[0].text === text && items[0].name === "Fia" && items[0].id && items[0].ts, "read back with the key: newest first, with name, id and ts", JSON.stringify(items[0]));
+    ok((await get("")).status === 403 && (await get("?key=wrong")).status === 403, "GET without / with a wrong key: 403");
+    const post = (body, ip) => fetch(`${http}/forslag`, { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip }, body: typeof body === "string" ? body : JSON.stringify(body) });
+    ok((await post({ text: "   " }, "10.0.0.1")).status === 400, "empty (whitespace) text: 400");
+    ok((await post({ text: "x".repeat(501) }, "10.0.0.2")).status === 400, "501 characters: 400");
+    ok((await post("{\"text\":\"" + "y".repeat(5000) + "\"}", "10.0.0.3")).status === 413, "a body over 4 KB: 413");
+    const okPost = await post({ text: "ok\u0007 med\tkontroll\ntecken", name: "Bo\u0000b" + "z".repeat(30) }, "10.0.0.4");
+    ok(okPost.status === 200 && (await okPost.json()).ok === true, "a valid post from another IP: { ok: true }");
+    ok((await post({ text: "igen" }, "10.0.0.4")).status === 429, "the same IP again within 10 s: 429");
+    const last = ((await (await get(`?key=${encodeURIComponent(key)}`)).json()).items || [])[0];
+    ok(last && last.text === "ok med kontroll\ntecken" && last.name === ("Bob" + "z".repeat(30)).slice(0, 14), "control characters stripped, name capped at 14", JSON.stringify(last));
+    const pre = await fetch(`${http}/forslag`, { method: "OPTIONS", headers: { origin: "http://example.test", "access-control-request-method": "POST", "access-control-request-headers": "content-type" } });
+    ok(pre.status === 204 && /content-type/.test(pre.headers.get("access-control-allow-headers") || ""), "CORS preflight for a JSON POST passes");
+    const del = await fetch(`${http}/forslag?key=${encodeURIComponent(key)}&id=${encodeURIComponent(items[0].id)}`, { method: "DELETE" });
+    ok(del.status === 200 && (await fetch(`${http}/forslag?key=wrong`, { method: "DELETE" })).status === 403, "DELETE one by id with the key; without it 403");
+    const b = await fetch(`${http}/board`); const bj = await b.json();
+    ok(b.status === 200 && Array.isArray(bj.entries), "the local relay's /board still answers", `entries ${bj.entries && bj.entries.length}`);
+  }
+  ok(!errors.filter((e) => !/404|Failed to load resource/.test(e)).length, "no console/page errors (besides the stubbed 404)", errors.join(" | "));
+  await context.close();
 }
 
 function fakeBoard(n) {
