@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".json": "application/json",
-  ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png", ".css": "text/css", ".md": "text/markdown; charset=utf-8" };
+  ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png", ".css": "text/css", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8" };
 
 /**
  * Serve ROOT on 127.0.0.1:<port> (0 = any free port). -> { url, close(), overrides }

@@ -678,6 +678,7 @@ export function createGame(canvas, opts) {
       whirls: (authoritative ? S.whirls : (lastView && lastView.whirls) || []).map((z) => [Math.round(z.x), Math.round(z.y), Math.round(z.r)]),
       missed: authoritative ? S.missed : (lastView ? lastView.missed : 0),
       saved: saved.length, quitBtn: QUIT_BTN, actionBtn: R.actionBtn(), leaveBtn: R.leaveBtn(),
+      muteBtn: { ...MUTE_BTN }, dashBtn: { ...DASH_BTN }, // (the HUD lays these out per canvas size: hud.js)
     }),
   };
 }
