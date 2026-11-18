@@ -351,7 +351,7 @@ P("   " + clients.filter((c) => c.final).map((c) => `${c.name} ${f1(pct(c.final.
 P(""); P("-- sanity");
 const check = (cond, msg, extra = "") => { P(`   ${cond ? "ok  " : "FAIL"}  ${msg}${extra ? "  " + extra : ""}`); if (!cond) fail(msg); return cond; };
 const playS = (c) => c.samples.filter((s) => s.ph === "play");
-const expectN = (c, s) => (KILL_AT && killedAt && s.t > killedAt + 8000 ? N - 1 : N);
+const expectN = (c, s) => (KILL_AT && killedAt && s.t >= killedAt + 8000 ? N - 1 : N);
 for (const c of clients) {
   const S = c.samples.filter((s) => s.ph !== "pre" && !(KILL_AT && killedAt && s.t > killedAt - 1000 && s.t < killedAt + 8000)); // around a host change the roster changes on purpose
   const bad = S.filter((s) => s.nMin !== 99 && (s.nMin !== expectN(c, s) || s.nMax !== expectN(c, s)));
