@@ -131,7 +131,8 @@ void main() {
     wfoam = max(wfoam, (1.0 - smoothstep(wA * 0.35, wA + aa, arc)) * env * brk);
     warm = max(warm, (0.5 + 0.5 * cos(ph * 2.0 * PI)) * env);       // lighter streaks between arms
     // a broken ring of foam where the water starts to fall in
-    float rf = (1.0 - smoothstep(1.2, 3.2 + aa, abs(d - R * (0.97 + 0.03 * sin(ang * 5.0 + t * 2.0))))) * step(0.42, vn(vec2(ang * 4.0 - t * 2.2, float(i))));
+    float seg = smoothstep(0.38, 0.62, vn(vec2(ang * 4.0 - t * 2.2, float(i))));   // pieces that taper at both ends
+    float rf = (1.0 - smoothstep(0.4 + 1.2 * seg, 1.0 + 2.2 * seg + aa, abs(d - R * (0.97 + 0.03 * sin(ang * 5.0 + t * 2.0))))) * seg;
     wfoam = max(wfoam, rf * 0.8);
   }
 
@@ -205,7 +206,7 @@ void main() {
     }
     shadow = max(shadow, sh * up * (kind > 0.5 && kind < 1.5 ? 0.8 : 1.0));
     // a diving monster: a dark shape under the surface
-    if (kind > 1.5) under = max(under, sub * (1.0 - smoothstep(0.55, 1.05, length((rel - vec2(-0.25 * r * b.w, 0.3 * r)) / (vec2(1.75, 0.8) * r)))));
+    if (kind > 1.5) under = max(under, sub * (1.0 - smoothstep(0.4, 1.0, length((rel - vec2(-0.25 * r * b.w, 0.3 * r)) / (vec2(1.75, 0.8) * r)))));
     // waterline foam, broken and churning
     float ed = length(lr / fr), ang = atan(lr.y, lr.x);
     float brk = 0.45 + 0.55 * vn(vec2(ang * 3.0 + fi * 7.0, t * 1.6 + fi));
@@ -240,9 +241,9 @@ void main() {
     float sd0 = sdBox(rel, hb), sds = sdBox(rel - vec2(8.0, 13.0), hb), fi = float(i);
     shadow = max(shadow, (1.0 - smoothstep(-4.0, 8.0, sds)) * 0.95);
     float brk = smoothstep(0.3, 0.75, vn(vec2((rel.x + rel.y) * 0.11 - t * 0.6, fi * 3.0 + t * 0.3)));
-    foam = max(foam, (1.0 - smoothstep(0.2, 1.8 + aa, abs(sd0 - 1.2 - brk * 1.2))) * brk * 0.8);
+    foam = max(foam, (1.0 - smoothstep(0.2, 1.8 + aa, abs(sd0 - 1.2 - brk * 1.2))) * brk * 0.6);
     float lp = fract(t * 0.4 + fi * 0.37);
-    foam = max(foam, (1.0 - smoothstep(0.0, 0.9 + aa, abs(sd0 - 3.0 - lp * 9.0))) * (1.0 - lp) * 0.5 * brk);
+    foam = max(foam, (1.0 - smoothstep(0.0, 0.9 + aa, abs(sd0 - 3.0 - lp * 9.0))) * (1.0 - lp) * 0.28 * brk);
     float wob = sin(p.x * 0.23 + t * 2.0) * 1.3 + sin(p.y * 0.19 - t * 1.6) * 1.3;
     refl = max(refl, (1.0 - smoothstep(1.0, 14.0, sd0 + wob)) * step(0.0, sd0));
   }
@@ -261,7 +262,7 @@ void main() {
   col = mix(col, vec3(0.01, 0.035, 0.06), core);
   col = mix(col, vec3(0.75, 0.9, 0.97), rimL * 0.75);
   col = mix(col, col * vec3(0.5, 0.6, 0.72), shadow * 0.72);                    // cool shadow
-  col = mix(col, vec3(0.03, 0.14, 0.2), under * 0.55);
+  col = mix(col, vec3(0.03, 0.14, 0.2), under * 0.8);
   col = mix(col, vec3(0.93, 0.97, 1.0), clamp(foam * (1.0 - core) + wfoam, 0.0, 1.0) * 0.82);
   vec2 vu = fc / u_res - 0.5;
   col *= 1.0 - dot(vu, vu) * 0.42;                                              // vignette
@@ -350,19 +351,25 @@ export function createWater(canvas2d, CW, CH) {
   } else level = 3;
 
   // ---- frame-time watch (during play only) ---------------------------------
-  let lastNow = 0, winSum = 0, winN = 0, win30 = 0, winStart = 0, bad = 0, graceUntil = 0, avgMs = 0;
+  // The frame interval tells "slow", the time render.js spends on the CPU tells
+  // whose fault: when the CPU takes most of the frame, the 2D water (more CPU
+  // work) would not help, so the last step (GPU -> 2D) is only taken when it doesn't.
+  let lastNow = 0, winSum = 0, winN = 0, win30 = 0, winStart = 0, bad = 0, graceUntil = 0, avgMs = 0, cpuSum = 0, avgCpu = 0, drawAt = 0;
   function watch(now, playing) {
     const dt = now - lastNow; lastNow = now;
-    if (!ladder || level >= 3 || !playing || document.hidden || !(dt > 0 && dt < 250) || now < graceUntil) { winSum = winN = win30 = 0; winStart = now; return; }
+    if (!ladder || level >= 3 || !playing || document.hidden || !(dt > 0 && dt < 250) || now < graceUntil) { winSum = winN = win30 = cpuSum = 0; winStart = now; return; }
     winSum += dt; winN++; if (dt > 30 && dt < 37) win30++;
     if (now - winStart < 1500 || winN < 20) return;
-    avgMs = winSum / winN;
+    avgMs = winSum / winN; avgCpu = cpuSum / winN;
     const capped30 = avgMs > 30 && avgMs < 37 && win30 / winN > 0.85; // a steady 30 Hz cap (iOS low power mode), not overload
+    const cpuBound = avgCpu > avgMs * 0.6;
     const limit = level >= 2 ? 30 : 22;
-    bad = avgMs > limit && !capped30 ? bad + 1 : 0;
-    winSum = winN = win30 = 0; winStart = now;
-    if (bad >= 2 || avgMs > 55) { bad = 0; stepDown(now); }
+    bad = avgMs > limit && !capped30 && !(level >= 2 && cpuBound) ? bad + 1 : 0;
+    winSum = winN = win30 = cpuSum = 0; winStart = now;
+    if (bad >= 2 || (avgMs > 55 && !(level >= 2 && cpuBound))) { bad = 0; stepDown(now); }
   }
+  // end of render.js's frame: its CPU time since draw() started
+  function frameDone() { if (drawAt) cpuSum += performance.now() - drawAt; drawAt = 0; }
   function stepDown(now) {
     level++;
     remember(level);
@@ -388,6 +395,7 @@ export function createWater(canvas2d, CW, CH) {
   function draw(sc) {
     const now = performance.now();
     watch(now, sc.playing);
+    drawAt = now;
     mDt = Math.min(0.1, (now - (mNow || now)) / 1000); mNow = now;
     if (!active || level >= 3 || !gl || gl.isContextLost()) return false;
     const prog = program(level >= 2);
@@ -448,8 +456,8 @@ export function createWater(canvas2d, CW, CH) {
   }
 
   return {
-    draw,
-    info: () => ({ mode: active && level < 3 ? "gl" : "2d", level, forced: FORCE, size, avgMs: Math.round(avgMs * 10) / 10, nObj, glCanvas: !!glc }),
+    draw, frameDone,
+    info: () => ({ mode: active && level < 3 ? "gl" : "2d", level, forced: FORCE, size, avgMs: Math.round(avgMs * 10) / 10, avgCpu: Math.round(avgCpu * 10) / 10, nObj, glCanvas: !!glc }),
     // tests: force the next step down now
     _stepDown: () => stepDown(performance.now()),
   };
@@ -509,7 +517,7 @@ export function drawWater2D(ctx, w, h, shore, t, lowFx, pxPerUnit) {
   // broad swell bands
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, w, shore - 12); ctx.clip();
   // caustics: two layers of a crisp tile, drifting apart
-  const want = Math.min(1024, Math.max(256, Math.pow(2, Math.ceil(Math.log2(TILE_W * pxPerUnit)))));
+  const want = Math.min(768, Math.max(256, Math.ceil(TILE_W * pxPerUnit / 32) * 32)); // one-time cost: ~70 ms at 728 px on a fast laptop
   const tile = causticTile(want), sc = TILE_W / tile.width;
   const pat = ctx.createPattern(tile, "repeat");
   ctx.globalCompositeOperation = "screen";

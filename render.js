@@ -70,6 +70,7 @@ export function createRenderer(canvas, ui) {
   let waveT = 0;
   const water = createWater(canvas, CW, CH);
   let glWater = false; // this frame's water came from the GPU layer: skip the 2D shadows/ripples/wakes it draws
+  let shoreLine = Infinity; // world y of the waterline this frame
   function fit(w, h) { const s = Math.min(CW / w, CH / h); return { s, ox: (CW - w * s) / 2, oy: (CH - h * s) / 2 }; }
   function toWorld(cx, cy, w, h) { const f = fit(w, h); return { x: (cx - f.ox) / f.s, y: (cy - f.oy) / f.s }; }
   function drawShore(w, h) {
@@ -229,7 +230,11 @@ export function createRenderer(canvas, ui) {
     const posts = [];
     for (let i = 0; i < nPost; i++) { const a = (i + 0.5) / nPost; for (const side of [-1, 1]) posts.push(horiz ? [o.x + a * L, o.y + o.h / 2 + side * (T / 2 + pr * 0.35)] : [o.x + o.w / 2 + side * (T / 2 + pr * 0.35), o.y + a * L]); }
     // shadow on the water (away from the light), warm reflection, foam lapping at the edge
-    // (the GPU water draws these itself)
+    // (the GPU water draws these itself, under the beach: the part of a dock over the sand gets its shadow here)
+    if (glWater && o.y + o.h + 10 > shoreLine) {
+      ctx.save(); ctx.beginPath(); ctx.rect(o.x - 20, shoreLine, o.w + 40, o.h + 40); ctx.clip();
+      ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 10, o.w, o.h, 3); ctx.fill(); ctx.restore();
+    }
     if (!glWater) {
       ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 10, o.w, o.h, 3); ctx.fill();
       ctx.fillStyle = "rgba(90,60,30,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 6, o.y - 6, o.w + 12, o.h + 12, 8); ctx.fill();
@@ -706,6 +711,7 @@ export function createRenderer(canvas, ui) {
     if (!glWater) for (const z of v.whirls || []) drawWhirl(z);
     drawShore(v.world.w, v.world.h);
     drawScenery(v.world.w, v.world.h);
+    shoreLine = shoreY(v.world);
     for (const o of v.obstacles) drawBrygga(o);
     for (const s of v.swimmers) drawSwimmer(s);
     for (const m of v.monsters || []) drawMonster(m);
@@ -716,6 +722,7 @@ export function createRenderer(canvas, ui) {
     drawLightGrade(v.world.w, v.world.h);
     resetBase();
     drawHUD(v); drawScoreboard(v); drawOverlays(v); drawQuitBtn(v); drawMute();
+    water.frameDone(); // (the quality ladder weighs the frame time against this CPU time)
   }
   function drawWaitScreen(msg) {
     drawNetLine();
