@@ -505,29 +505,98 @@ export function createGame(canvas, opts) {
   function setupSolo() { addPlayer(selfId, myName); beginGame(); startLevel(0); phase = Phase.INTRO; introTimer = 2.4; emitPhase(); }
   // ---- Relay transport: same surface as a Trystero room (tuple actions,
   // onPeerJoin/Leave, getPeers) but over one plain WebSocket to the relay.
+  //
+  // Reconnects with a short backoff, and also on purpose: when the page comes
+  // back after more than 5 s in the background (iOS keeps dead sockets "OPEN")
+  // and when the browser comes back online. The relay keeps one socket per
+  // connection, not per id, so a reconnect is seen by everyone else as a join
+  // (ignored: already known) and, whenever the old socket finally closes on the
+  // server, a leave for the same id. A leave therefore only counts after a
+  // short grace period, during which we ask the room whether that id is still
+  // here ("_who"); its answer ("_here") — or any message or join from it —
+  // cancels the leave. So a reconnect never drops a player from the roster and
+  // never starts a host election. ("_who"/"_here" are relay-transport only;
+  // older clients ignore unknown actions.)
   function relayJoin(url, roomId) {
-    const handlers = new Map(); const peers = new Set(); const queue = [];
-    let joinCb = () => {}, leaveCb = () => {}, ws = null, open = false, closed = false;
-    const connect = () => {
+    const BACKOFF = [400, 1000, 2000, 4000, 6000], KEEPALIVE_MS = 25000, LEAVE_GRACE_MS = 2500;
+    const handlers = new Map(); const peers = new Set(); const queue = []; const pendingLeave = new Map();
+    let joinCb = () => {}, leaveCb = () => {}, ws = null, open = false, closed = false, tries = 0, retry = 0, hiddenAt = 0, lastHere = 0;
+    const stats = { connects: 0, forced: 0 };
+    const addPeer = (id) => { if (!id || id === selfId) return; cancelLeave(id); if (!peers.has(id)) { peers.add(id); joinCb(id); } };
+    function cancelLeave(id) { const t = pendingLeave.get(id); if (t) { clearTimeout(t); pendingLeave.delete(id); } }
+    function deferLeave(id) {
+      if (!id || id === selfId || !peers.has(id) || pendingLeave.has(id)) return;
+      pendingLeave.set(id, setTimeout(() => { pendingLeave.delete(id); if (peers.delete(id)) leaveCb(id); }, LEAVE_GRACE_MS));
+      sendRaw({ t: "msg", a: "_who", d: { id } });
+    }
+    const sayHere = () => { const now = performance.now(); if (now - lastHere < 300) return; lastHere = now; sendRaw({ t: "msg", a: "_here", d: {} }); };
+    function drop() { const s = ws; ws = null; open = false; if (s) { s.onopen = s.onmessage = s.onclose = s.onerror = null; try { s.close(); } catch {} } }
+    function later() {
       if (closed) return;
-      ws = new WebSocket(`${url.replace(/\/$/, "")}/room/${encodeURIComponent(roomId)}?id=${encodeURIComponent(selfId)}`);
-      ws.onopen = () => { open = true; for (const q of queue) ws.send(q); queue.length = 0; };
-      ws.onmessage = (e) => {
+      clearTimeout(retry);
+      const ms = BACKOFF[Math.min(tries++, BACKOFF.length - 1)];
+      retry = setTimeout(() => connect(false), document.hidden ? Math.max(ms, 3000) : ms);
+    }
+    function connect(force) {
+      if (closed) return;
+      clearTimeout(retry);
+      if (!force && ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      if (force) stats.forced++;
+      drop(); // the old socket's handlers are detached first: its late onclose can't schedule another connect
+      let sock;
+      try { sock = new WebSocket(`${url.replace(/\/$/, "")}/room/${encodeURIComponent(roomId)}?id=${encodeURIComponent(selfId)}`); }
+      catch { later(); return; }
+      ws = sock; stats.connects++;
+      sock.onopen = () => { if (sock !== ws) return; open = true; for (const q of queue) sock.send(q); queue.length = 0; };
+      sock.onmessage = (e) => {
+        if (sock !== ws) return;
         let m; try { m = JSON.parse(e.data); } catch { return; }
-        if (m.t === "welcome") { for (const id of m.peers || []) if (!peers.has(id)) { peers.add(id); joinCb(id); } }
-        else if (m.t === "peer") { if (m.join) { if (!peers.has(m.id)) { peers.add(m.id); joinCb(m.id); } } else if (peers.delete(m.id)) leaveCb(m.id); }
-        else if (m.t === "msg") { const cb = handlers.get(m.a); if (cb) cb(m.d, m.from); }
+        if (m.t === "welcome") {
+          tries = 0;
+          const here = new Set((m.peers || []).filter((id) => id !== selfId)); // (a stale socket of ours may still be listed)
+          for (const id of here) addPeer(id);
+          for (const id of [...peers]) if (!here.has(id)) deferLeave(id); // left while we were away (or a stale entry)
+          if (stats.connects > 1) { sayHere(); setTimeout(sayHere, 1200); } // cover our old socket's leave reaching the others late
+        } else if (m.t === "peer") {
+          if (m.id === selfId) return; // our own old socket coming or going
+          if (m.join) addPeer(m.id); else deferLeave(m.id);
+        } else if (m.t === "msg") {
+          if (!m.from || m.from === selfId) return;
+          addPeer(m.from); // anything from a peer proves it is here
+          if (m.a === "_who") { if (m.d && m.d.id === selfId) sayHere(); return; }
+          if (m.a === "_here") return;
+          const cb = handlers.get(m.a); if (cb) cb(m.d, m.from);
+        }
       };
-      ws.onclose = () => { open = false; if (!closed) setTimeout(connect, 1500); };
-      ws.onerror = () => {};
+      sock.onclose = () => { if (sock !== ws) return; ws = null; open = false; later(); };
+      sock.onerror = () => {}; // onclose follows
+    }
+    const onVisible = () => {
+      if (closed) return;
+      if (document.hidden) { hiddenAt = hiddenAt || performance.now(); return; }
+      const away = hiddenAt ? performance.now() - hiddenAt : 0; hiddenAt = 0;
+      if (away > 5000) connect(true); else if (!open) connect(false);
     };
-    connect();
-    const sendRaw = (o) => { const s = JSON.stringify(o); if (open) ws.send(s); else if (queue.length < 60) queue.push(s); };
+    const onPageShow = (e) => { if (!closed && e.persisted) connect(true); }; // back from the bfcache
+    const onOnline = () => { if (!closed) connect(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    addEventListener("pageshow", onPageShow);
+    addEventListener("online", onOnline);
+    const ka = setInterval(() => { if (open && ws) { try { ws.send('{"t":"ka"}'); } catch {} } }, KEEPALIVE_MS); // the relay ignores it; keeps NATs / radios from dropping an idle socket
+    connect(false);
+    function sendRaw(o) { const s = JSON.stringify(o); if (open && ws) { try { ws.send(s); } catch {} } else if (queue.length < 60) queue.push(s); }
     return {
       makeAction: (name) => [(d) => sendRaw({ t: "msg", a: name, d }), (cb) => handlers.set(name, cb)],
       onPeerJoin: (cb) => { joinCb = cb; }, onPeerLeave: (cb) => { leaveCb = cb; },
       getPeers: () => Object.fromEntries([...peers].map((p) => [p, true])),
-      isOpen: () => open, leave: () => { closed = true; try { ws && ws.close(); } catch {} },
+      isOpen: () => open,
+      reconnect: () => connect(true), stats: () => ({ ...stats, open, peers: [...peers], pendingLeaves: pendingLeave.size }),
+      leave: () => {
+        closed = true; clearTimeout(retry); clearInterval(ka);
+        for (const t of pendingLeave.values()) clearTimeout(t); pendingLeave.clear();
+        document.removeEventListener("visibilitychange", onVisible); removeEventListener("pageshow", onPageShow); removeEventListener("online", onOnline);
+        try { ws && ws.close(); } catch {}
+      },
     };
   }
 
@@ -1922,7 +1991,7 @@ export function createGame(canvas, opts) {
   requestAnimationFrame(frame);
 
   return {
-    hostStart, getRoom: () => opts.room, roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
+    hostStart, getRoom: () => opts.room, relay: () => (room && room.stats ? room.stats() : null), roster: rosterList, clearBoard, quitGame, netStatus, netSummary,
     board: () => ({ source: boardSource, entries: board.slice(0, BOARD_SHOW) }),
     signaling: () => (RELAY_URL ? "" : (SIGNAL.resolved ? SIGNAL.name : "")),
     _jump: (idx) => { if (authoritative) { levelIndex = Math.max(0, Math.min(BASE_LEVELS.length - 1, idx | 0)); startLevel(levelIndex); phase = Phase.PLAY; emitPhase(); pushState(); } },
