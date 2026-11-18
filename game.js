@@ -543,8 +543,12 @@ export function createGame(canvas, opts) {
     S.players = new Map();
     for (const [id, p] of iPlayer) {
       if (id === v.hostId) continue;
-      S.players.set(id, { id, name: id === selfId ? myName : (p.name || "Spelare"), x: id === selfId ? selfPos.x : p.x, y: id === selfId ? selfPos.y : p.y, r: 30, hue: p.hue, dashActive: 0, dashCooldown: 0, rescues: p.rescues || 0, input: { dx: 0, dy: 0, dash: false } });
+      S.players.set(id, { id, name: id === selfId ? myName : (p.name || "Spelare"), x: id === selfId ? selfPos.x : p.x, y: id === selfId ? selfPos.y : p.y, r: 30, hue: p.hue, dashActive: 0, dashCooldown: 0, rescues: p.rescues || 0, score: p.score || 0, input: { dx: 0, dy: 0, dash: false } });
     }
+    // The monsters carry over too (they used to vanish when the host changed). The sim
+    // fills in heading, speed and the dive cycle on its first step for any monster without them.
+    S.monsters = [];
+    for (const [id, m] of iMonster) { S.monsters.push({ id, x: m.x, y: m.y, vx: 0, vy: 0, r: m.r || 30, wob: m.wob || 0, dir: m.dir || 0 }); S.monsterSeq = Math.max(S.monsterSeq, id + 1); }
     if (!S.players.has(selfId)) addPlayer(selfId, myName);
     S.swimmers = [];
     for (const [id, s] of iSwim) { const ang = Math.random() * Math.PI * 2; S.swimmers.push({ id, x: s.x, y: s.y, r: s.r || 16, vx: Math.cos(ang) * L.speed, vy: Math.sin(ang) * L.speed, life: (s.frac || 1) * L.sink, maxLife: L.sink, bob: Math.random() * 6, sk: s.sk || 0, hr: s.hr || 0 }); S.swimmerSeq = Math.max(S.swimmerSeq, id + 1); }

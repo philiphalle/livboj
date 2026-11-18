@@ -384,7 +384,17 @@ if (want("live")) {
   await check("host 'online' event (in game)", H.page, () => H.page.evaluate(() => window.dispatchEvent(new Event("online"))));
   console.log("        rosters:", JSON.stringify(await names()));
   ok(!H.errors.length && !J.errors.length, "no console/page errors on either page", [...H.errors, ...J.errors].join(" | "));
-  await H.context.close(); await J.context.close();
+  // host change: the host disappears mid-level, the joiner takes over — with the monsters still there
+  await H.page.evaluate(() => window.livboj._jump(5)); // level 6: three monsters
+  await J.page.waitForFunction(() => { const d = window.livboj.debug(); return d.phase === "play" && d.monsters === 3; }, null, { timeout: 10000 });
+  await H.context.close();
+  let took = true; try { await J.page.waitForFunction(() => window.livboj.debug().authoritative, null, { timeout: 20000 }); } catch { took = false; }
+  ok(took, "host gone: the joiner takes over as host");
+  const m1 = await J.page.evaluate(() => window.livboj.debug()); await sleep(2000); const m2 = await J.page.evaluate(() => window.livboj.debug());
+  ok(m1.monsters === 3 && m2.monsters === 3, "…and the monsters are still in the water", `monsters ${m1.monsters} then ${m2.monsters}`);
+  ok(JSON.stringify(m1.mon.map((m) => m.slice(0, 2))) !== JSON.stringify(m2.mon.map((m) => m.slice(0, 2))) && m2.mon.every((m) => Number.isFinite(m[0]) && Number.isFinite(m[1])), "…and they keep swimming under the new host", JSON.stringify(m2.mon.map((m) => m.slice(0, 2))));
+  ok(m2.phase === "play" && !J.errors.length, "…the level goes on, no errors", `phase ${m2.phase} ${J.errors.join(" | ")}`);
+  await J.context.close();
 }
 
 // ---------------------------------------------------------------- Nyheter + Förslagslåda
