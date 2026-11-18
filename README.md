@@ -17,7 +17,7 @@ whirlpool. A shared global leaderboard keeps every finished game.
 | `sim.js` | The rules: levels, world size, spawning, swimmers, monsters, whirlpools, swamps, docks, collisions, scoring, phases. Pure (no DOM, audio, network, storage or clock), so node runs it; solo and the host run it, joiners only draw the host's state. |
 | `render.js` | The world drawn on the canvas: water, shore, beach, swamps, docks, swimmers, monsters, rings, gulls (logical 900×600, HiDPI backing store). |
 | `water.js` | The water: a WebGL layer under the game canvas (one fragment shader: depth, caustics, waves, shadows, foam, wakes, the whirlpool) with a 2D fallback of the same look. Steps down in quality when frames are slow; `?water=2d`, `?water=gl` or `?water=low` forces a mode. |
-| `hud.js` | The canvas UI on top: HUD, on-canvas buttons (mute, *Spurt*, *Avsluta spelet*, the screens' buttons), the intro / level / end / lobby screens, vector icons. Scales up on small canvases (phones); the fullscreen button's CSS repeats its formula. |
+| `hud.js` | The canvas UI on top: HUD, on-canvas buttons (mute, *Spurt*, *Avsluta spelet*, the screens' buttons), the intro / level / end / lobby screens, vector icons. Scales up on small canvases (phones); the fullscreen button's CSS repeats its formula. A HUD piece with a swimmer, monster or ring under it turns see-through (and a swimmer's sink gauge is drawn above it), so the HUD never hides what you must reach. |
 | `fonts/` | Fredoka (SIL OFL 1.1, `OFL.txt`), the UI's display face, self-hosted and loaded without blocking (the system font draws until it has arrived). A changed font file gets a new name: it is not fingerprinted by `boot.js`. |
 | `net.js` | The room transports (WebSocket relay, Trystero P2P fallback) and the relay's HTTP endpoints (leaderboard + its localStorage outbox, Förslagslåda). |
 | `boot.js` | Fingerprints every module, loads `game.js?v=<build>` and watches for new builds (see *Deploy*). |
@@ -102,7 +102,7 @@ The relay is deployed separately with `npx wrangler deploy` in `relay/` (see `re
 ```bash
 node tools/sim-test.mjs           # the rules (sim.js) in plain node: no install, no browser, ~1 s
 npm install                       # once: Playwright for the tools below (or it is found in the npx cache)
-node tools/smoke.mjs              # layout, fullscreen, water layer, input, leaderboard queue, cache busting (leaderboard always stubbed)
+node tools/smoke.mjs              # layout, fullscreen, water layer, HUD see-through, input, leaderboard queue, cache busting (leaderboard always stubbed)
 node tools/smoke.mjs --live       # + host/join and forced reconnects through the live relay
 node tools/smoke.mjs --only forslag,live --relay ws://127.0.0.1:8787   # against wrangler dev --local
 node tools/shot.mjs               # screenshots of menu + solo game at desktop and phone sizes -> shots/

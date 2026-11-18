@@ -680,6 +680,8 @@ export function createGame(canvas, opts) {
       missed: authoritative ? S.missed : (lastView ? lastView.missed : 0),
       saved: saved.length, quitBtn: QUIT_BTN, actionBtn: R.actionBtn(), leaveBtn: R.leaveBtn(),
       muteBtn: { ...MUTE_BTN }, dashBtn: { ...DASH_BTN }, // (the HUD lays these out per canvas size: hud.js)
+      hud: R.hudSee(), // each HUD piece's rect (canvas coords) and how see-through it is now (0 … 1): something under it
+      fit: (() => { const w = curWorld(), f = R.fit(w.w, w.h); return { s: f.s, ox: f.ox, oy: f.oy }; })(),
     }),
   };
 }

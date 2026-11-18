@@ -13,8 +13,6 @@ const { createWater, drawWater2D } = await import(`./water.js${new URL(import.me
 const { createHud, uiFont } = await import(`./hud.js${new URL(import.meta.url).search}`);
 
 const SUITS = ["#e5484d", "#3aa0ff", "#ffb020", "#8b5cf6", "#22c55e", "#ec4899"];
-// seagulls: altitude band below the HUD, speed, start, flap phase, direction, size
-const GULLS = [{ y: 150, sp: 26, x0: 0, ph: 0, dir: 1, s: 1.35 }, { y: 250, sp: 34, x0: 420, ph: 0.4, dir: 1, s: 1.15 }, { y: 200, sp: 22, x0: 260, ph: 0.7, dir: -1, s: 1.25 }];
 // Lighten/darken a #rrggbb colour to an "rgb(...)" string for shading.
 function shadeHex(hex, f) {
   const n = parseInt(hex.slice(1), 16), c = (v) => Math.max(0, Math.min(255, Math.round(v * f)));
@@ -39,7 +37,9 @@ export function createRenderer(canvas, ui) {
   let lowFx = false; // level-of-detail: lighten shading when the water is crowded
   // HUD, on-canvas buttons and the screens (hud.js); the button objects are laid out there every frame
   const hud = createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfPos, live: ui.live,
-    drawRing: (x, y, r, hue, glow) => drawLivboj(x, y, r, hue, glow, null, false, false) });
+    drawRing: (x, y, r, hue, glow) => drawLivboj(x, y, r, hue, glow, null, false, false),
+    drawGauge: (g) => { ctx.save(); ctx.translate(g.x, g.y); ctx.scale(g.s, g.s); drawGaugeRing(g.R, g.frac, g.ch, g.t, true); ctx.restore(); },
+    underlay: () => (glWater ? water.layer() : null) });
   // ---- Rendering ----------------------------------------------------------
   let waveT = 0;
   const water = createWater(canvas, CW, CH);
@@ -299,85 +299,142 @@ export function createRenderer(canvas, ui) {
     for (let k = 0; k < 5; k++) { const a = -Math.PI / 2 + k * 2 * Math.PI / 5; for (const f of [0.35, 0.58, 0.8]) { ctx.beginPath(); ctx.arc(Math.cos(a) * R * f, Math.sin(a) * R * f, 0.85 - f * 0.4, 0, Math.PI * 2); ctx.fill(); } }
     ctx.restore();
   }
-  // ---- Seagulls: small birds seen from above, with a shadow on the water far below ----------
-  function drawSeagulls(w, t) {
-    for (let i = 0; i < GULLS.length; i++) {
-      const g = GULLS[i], span = w + 160, x0 = ((t * g.sp + g.x0) % span + span) % span - 80, x = g.dir > 0 ? x0 : w - x0;
-      const y = g.y + Math.sin(t * 0.5 + i * 2) * 14, vy = Math.cos(t * 0.5 + i * 2) * 7 / g.sp, ang = Math.atan2(vy * g.sp, g.dir * g.sp);
-      // flap for a while, then glide
-      const cyc = (t * 0.35 + g.ph) % 1, flapping = cyc < 0.55, flap = flapping ? Math.sin(t * 9 + g.ph * 6) : 0.25;
-      if (!lowFx) drawGull(x + 26, y + 58, ang, flap, g.s * 0.9, true);
-      drawGull(x, y, ang, flap, g.s, false);
+  // ---- Seagulls: two calm gulls seen from above — one soaring in slow circles off the left edge, one
+  // gliding along the surf line — so they stay out of the middle (the whirlpool, the players). Bent "M"
+  // wings with black tips, a yellow beak; mostly gliding, now and then a few slow beats; a faint shadow
+  // on the water far below. lowFx: one gull, no shadow.
+  function drawSeagulls(w, h, shore, t) {
+    for (let i = 0; i < (lowFx ? 1 : 2); i++) {
+      let x, y, ang;
+      if (i === 0) { // the shore glider: left to right along the foam, a gentle rise and fall
+        const span = w + 200, sp = 21; x = ((t * sp) % span + span) % span - 100;
+        y = shore - 24 + Math.sin(t * 0.37) * 12; ang = Math.atan2(Math.cos(t * 0.37) * 12 * 0.37, sp);
+      } else { // the soarer: a slow wide circle, half of it beyond the left edge
+        const th = t * 0.21 + 2, cx = w * 0.03, cy = h * 0.48, R = Math.min(90, h * 0.14);
+        x = cx + Math.cos(th) * R; y = cy + Math.sin(th) * R * 0.8; ang = Math.atan2(Math.cos(th) * 0.8, -Math.sin(th)) ;
+      }
+      const ph = i * 0.47, cyc = (t * 0.16 + ph) % 1; // flap for about a fifth of the time, then glide
+      const env = cyc < 0.2 ? Math.sin(cyc / 0.2 * Math.PI) : 0, flap = Math.sin(t * 6.5 + i * 2) * env;
+      const s = i === 0 ? 0.95 : 1.05;
+      if (!lowFx) drawGull(x + 16, y + 30, ang, flap, s * 0.92, true);
+      drawGull(x, y, ang, flap, s, false);
     }
   }
   function drawGull(x, y, ang, flap, s, shadow) {
     ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(s, s);
-    // wings: length foreshortens as they beat (seen from above), tips swept back
-    const L = 15 * (0.55 + 0.45 * Math.abs(flap)), sweep = 4 + 3 * (flap < 0 ? -flap : 0);
-    const wing = (side) => { ctx.beginPath(); ctx.moveTo(2.5, 0); ctx.quadraticCurveTo(1, side * L * 0.55, -sweep, side * L); ctx.quadraticCurveTo(-3.5, side * L * 0.55, -4.5, side * 1.5); ctx.closePath(); };
+    // a wing beat seen from above: the span shortens at the top and bottom of the stroke,
+    // the wrist bends forward more while gliding (the "M"), the hand sweeps back
+    const k = 1 - Math.abs(flap), span = 15 * (0.62 + 0.38 * k), wx = 3.2 + 1.2 * k, wy = span * 0.44, tx = -5.5 - 2.5 * (1 - k), ty = span;
+    const wing = (sd) => {
+      ctx.beginPath(); ctx.moveTo(2.4, sd * 1.6);
+      ctx.quadraticCurveTo(3.4, sd * wy * 0.5, wx, sd * wy);            // leading edge to the wrist
+      ctx.quadraticCurveTo(wx - 2.6, sd * (wy + span * 0.32), tx, sd * ty); // the hand, swept back to the tip
+      ctx.quadraticCurveTo(tx + 1.5, sd * span * 0.7, wx - 4.6, sd * wy * 1.02); // trailing edge of the hand
+      ctx.quadraticCurveTo(-1.8, sd * wy * 0.62, -3.6, sd * 1.6);         // trailing edge of the arm
+      ctx.closePath();
+    };
     if (shadow) {
-      ctx.fillStyle = "rgba(3,22,36,0.20)"; wing(-1); ctx.fill(); wing(1); ctx.fill();
-      ctx.beginPath(); ctx.ellipse(0, 0, 7.5, 2.4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(3,22,36,0.11)"; wing(-1); ctx.fill(); wing(1); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(0, 0, 7, 2.2, 0, 0, Math.PI * 2); ctx.fill();
       ctx.restore(); return;
     }
-    for (const side of [-1, 1]) {
-      wing(side); const gr = ctx.createLinearGradient(0, 0, 0, side * L); gr.addColorStop(0, "#f4f7fa"); gr.addColorStop(0.65, "#c5d0da"); gr.addColorStop(1, "#8d9aa6");
-      ctx.fillStyle = gr; ctx.fill(); ctx.strokeStyle = "rgba(40,60,80,0.35)"; ctx.lineWidth = 0.7 / s; ctx.stroke();
-      ctx.fillStyle = "#2a2d33"; ctx.beginPath(); ctx.moveTo(-sweep, side * L); ctx.quadraticCurveTo(-sweep + 1.5, side * L * 0.8, -sweep + 3.2, side * L * 0.72); ctx.lineTo(-sweep - 0.5, side * L * 0.78); ctx.closePath(); ctx.fill(); // black tips
+    ctx.lineJoin = "round";
+    for (const sd of [-1, 1]) {
+      wing(sd);
+      const g = ctx.createLinearGradient(0, 0, 0, sd * span); g.addColorStop(0, "#c9d3dc"); g.addColorStop(0.5, "#b2bfca"); g.addColorStop(1, "#9eacb8");
+      ctx.fillStyle = g; ctx.fill();
+      ctx.save(); ctx.clip();
+      // white trailing edge along the arm, black primaries at the tip with a white mirror spot
+      ctx.strokeStyle = "rgba(255,255,255,0.75)"; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.moveTo(-3.6, sd * 1.8); ctx.quadraticCurveTo(-1.8, sd * wy * 0.62, wx - 4.6, sd * wy * 1.02); ctx.stroke();
+      ctx.fillStyle = "#24272c"; ctx.beginPath();
+      const bx = wx + (tx - wx) * 0.5, by = wy + (ty - wy) * 0.5;
+      ctx.moveTo(bx + 1.6, sd * (by - 0.2)); ctx.lineTo(tx - 2, sd * (ty + 1)); ctx.lineTo(bx - 3.2, sd * (by + 0.4)); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.beginPath(); ctx.arc(tx + 1.1, sd * (ty - 1.4), 0.7, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      wing(sd); ctx.strokeStyle = "rgba(40,55,70,0.45)"; ctx.lineWidth = 0.6; ctx.stroke();
     }
-    ctx.fillStyle = "#e6ecf1"; ctx.beginPath(); ctx.moveTo(-6.5, 0); ctx.lineTo(-9.5, -2); ctx.lineTo(-9.5, 2); ctx.closePath(); ctx.fill(); // tail
-    const bg = ctx.createLinearGradient(0, -2.6, 0, 2.6); bg.addColorStop(0, "#ffffff"); bg.addColorStop(1, "#d6dee6");
-    ctx.fillStyle = bg; ctx.beginPath(); ctx.ellipse(-0.5, 0, 7, 2.6, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(5.8, 0, 2.3, 0, Math.PI * 2); ctx.fill(); // head
-    ctx.fillStyle = "#ffb020"; ctx.beginPath(); ctx.moveTo(7.8, -0.8); ctx.lineTo(10.4, 0); ctx.lineTo(7.8, 0.8); ctx.closePath(); ctx.fill(); // beak
-    ctx.fillStyle = "#1c1c1c"; ctx.beginPath(); ctx.arc(6.4, -1.2, 0.5, 0, Math.PI * 2); ctx.arc(6.4, 1.2, 0.5, 0, Math.PI * 2); ctx.fill();
+    // tail: a short white fan with a grey edge; body and head white, shaded on the far side
+    ctx.fillStyle = "#eef2f5"; ctx.beginPath(); ctx.moveTo(-5, -2); ctx.lineTo(-9.6, -2.6); ctx.quadraticCurveTo(-10.4, 0, -9.6, 2.6); ctx.lineTo(-5, 2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = "rgba(60,75,90,0.4)"; ctx.lineWidth = 0.6; ctx.stroke();
+    const bg = ctx.createLinearGradient(0, -2.6, 0, 2.6); bg.addColorStop(0, "#ffffff"); bg.addColorStop(1, "#d3dbe2");
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.ellipse(-0.6, 0, 6.6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(5.4, 0, 2.5, 2.2, 0, 0, Math.PI * 2); ctx.fill(); // head
+    ctx.strokeStyle = "rgba(60,75,90,0.35)"; ctx.lineWidth = 0.6; ctx.beginPath(); ctx.ellipse(-0.6, 0, 6.6, 2.5, 0, 0.5, Math.PI * 2 - 0.5); ctx.stroke();
+    ctx.fillStyle = "#f6c12b"; ctx.beginPath(); ctx.moveTo(7.4, -0.75); ctx.lineTo(10.2, -0.2); ctx.lineTo(10.2, 0.2); ctx.lineTo(7.4, 0.75); ctx.closePath(); ctx.fill(); // beak
+    ctx.fillStyle = "#e5484d"; ctx.beginPath(); ctx.arc(9.3, 0.25, 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#1c1c1c"; ctx.beginPath(); ctx.arc(6.1, -1.25, 0.45, 0, Math.PI * 2); ctx.arc(6.1, 1.25, 0.45, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   }
-  // ---- Swamps: algae and reed patches, translucent over whatever water is beneath ----------------
-  // The still part (feathered body, mottled algae, duckweed, rim) is painted once per swamp and
-  // backing-store scale into an offscreen canvas; lily pads, flowers, reeds and bubbles move live.
+  // ---- Swamps: algae and reed patches in the water, not islands ---------------------------------
+  // A faint murky tint, irregular algae clumps with open-water channels between them (the water's
+  // caustics and waves show through), duckweed drifted against the slow zone's edge: painted once per
+  // swamp and backing-store scale into an offscreen canvas. Lily pads, flowers, reeds and bubbles —
+  // the "slow here" cue — move live.
   const swampCache = new Map();
   function swampShape(z) {
     const cx = z.x + z.w / 2, cy = z.y + z.h / 2, rx = z.w / 2, ry = z.h / 2, seed = z.x * 0.03 + z.y * 0.07;
     const rad = (a) => 1 + 0.07 * Math.sin(a * 3 + seed) + 0.05 * Math.sin(a * 5 + seed * 1.3) + 0.03 * Math.sin(a * 8 - seed);
-    return { cx, cy, rx, ry, seed, rad };
+    // value noise (smooth, deterministic per swamp): where the algae grows and where open water stays
+    const hash = (i, j) => { const v = Math.sin(i * 127.1 + j * 311.7 + seed * 17.3) * 43758.5453; return v - Math.floor(v); };
+    const vn = (x, y) => { const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+      return (hash(i, j) * (1 - ux) + hash(i + 1, j) * ux) * (1 - uy) + (hash(i, j + 1) * (1 - ux) + hash(i + 1, j + 1) * ux) * uy; };
+    const sm = (e0, e1, x) => { const k = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return k * k * (3 - 2 * k); };
+    // the slow zone (sim.js inSwamp) is this ellipse out to r ≈ 1.04: the plants keep to it, with a gently uneven edge
+    const R = (x, y) => Math.hypot((x - cx) / rx, (y - cy) / ry);
+    const edge = (x, y) => { const a = Math.atan2((y - cy) / ry, (x - cx) / rx); return 1.03 + 0.025 * Math.sin(a * 5 + seed) + 0.02 * Math.sin(a * 9 - seed * 2); };
+    const grow = (x, y) => 0.62 * vn(x / 34, y / 34) + 0.38 * vn(x / 13 + 40, y / 13); // clumps and channels
+    return { cx, cy, rx, ry, seed, rad, R, edge, grow, sm };
   }
   function swampBase(z, scale) {
     const key = `${z.x | 0},${z.y | 0},${z.w | 0},${z.h | 0},${scale.toFixed(2)}`;
     let c = swampCache.get(key);
     if (c) return c;
     if (swampCache.size > 12) swampCache.clear();
-    const { cx, cy, rx, ry, seed, rad } = swampShape(z), M = 26;
+    const { cx, cy, rx, ry, seed, R, edge, grow, sm } = swampShape(z), M = 26;
     const cv = document.createElement("canvas"); cv.width = Math.ceil((z.w + M * 2) * scale); cv.height = Math.ceil((z.h + M * 2) * scale);
     const g = cv.getContext("2d"); g.scale(scale, scale); g.translate(M - z.x, M - z.y);
     let s = Math.abs(Math.round(seed * 1000)) + 7; const rnd = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
-    const blob = (k, wob = 0) => { g.beginPath(); for (let i = 0; i <= 72; i++) { const a = i / 72 * Math.PI * 2, f = (rad(a) + wob * Math.sin(a * 13 + seed * 3)) * k; const x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.closePath(); };
-    // feathered edge: a soft halo of thin green, fading outwards
-    for (let k = 5; k >= 1; k--) { blob(1 + k * 0.035, 0.012); g.fillStyle = `rgba(92,128,48,${0.05 + (5 - k) * 0.012})`; g.fill(); }
-    // body: deep olive murk in the middle, brighter algae toward the rim
-    const body = g.createRadialGradient(cx - rx * 0.1, cy - ry * 0.1, Math.min(rx, ry) * 0.1, cx, cy, Math.max(rx, ry) * 1.02);
-    body.addColorStop(0, "rgba(38,66,30,0.58)"); body.addColorStop(0.55, "rgba(58,94,38,0.47)"); body.addColorStop(0.85, "rgba(96,132,52,0.40)"); body.addColorStop(1, "rgba(128,158,66,0.34)");
-    blob(1); g.fillStyle = body; g.fill();
-    g.save(); blob(1); g.clip();
-    // mottling: dark open-water pockets and lighter algae clouds
-    for (let i = 0; i < 46; i++) {
-      const a = rnd() * Math.PI * 2, f = Math.sqrt(rnd()) * 0.95, x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f, r = (0.08 + rnd() * 0.16) * Math.min(rx, ry);
-      const dark = i % 3 === 0, col = dark ? "20,46,28" : (i % 3 === 1 ? "140,172,72" : "104,150,60"), al = dark ? 0.32 : 0.26;
-      const rg = g.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, `rgba(${col},${al})`); rg.addColorStop(1, `rgba(${col},0)`);
-      g.fillStyle = rg; g.fillRect(x - r, y - r, r * 2, r * 2);
+    // 1. a faint murky tint — the water stays water: its caustics and waves show through
+    //    over the whole zone, with a soft but definite edge where the slow water ends
+    const tint = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+    tint.addColorStop(0, "rgba(40,66,32,0.26)"); tint.addColorStop(0.8, "rgba(52,82,38,0.22)"); tint.addColorStop(0.93, "rgba(62,94,42,0.2)"); tint.addColorStop(1, "rgba(66,98,44,0)");
+    g.save(); g.translate(cx, cy); g.scale(rx * 1.07, ry * 1.07); g.fillStyle = tint; g.beginPath(); g.arc(0, 0, 1, 0, Math.PI * 2); g.fill(); g.restore();
+    // 2. algae clumps: soft overlapping blobs where the growth noise is high (open-water channels between), thinning toward the edge
+    const step = 5.5;
+    for (let y = cy - ry * 1.1; y <= cy + ry * 1.1; y += step) for (let x = cx - rx * 1.1; x <= cx + rx * 1.1; x += step) {
+      const jx = x + (rnd() - 0.5) * step, jy = y + (rnd() - 0.5) * step, r = R(jx, jy), e = edge(jx, jy);
+      const dens = sm(0.42, 0.66, grow(jx, jy)) * (1 - sm(e - 0.22, e - 0.02, r));
+      if (dens < 0.06 || rnd() > 0.35 + 0.65 * dens) continue;
+      const br = rnd(), col = br < 0.25 ? "34,62,30" : br < 0.7 ? "74,112,46" : "118,150,62", rad = 3 + rnd() * 5 * (0.5 + dens);
+      const rg = g.createRadialGradient(jx, jy, 0, jx, jy, rad); rg.addColorStop(0, `rgba(${col},${0.22 + 0.22 * dens})`); rg.addColorStop(1, `rgba(${col},0)`);
+      g.fillStyle = rg; g.fillRect(jx - rad, jy - rad, rad * 2, rad * 2);
     }
-    // duckweed: tiny bright specks, thicker toward the rim
-    for (let i = 0; i < 700; i++) {
-      const a = rnd() * Math.PI * 2, f = 0.35 + Math.pow(rnd(), 0.5) * 0.68, x = cx + Math.cos(a) * rx * f * rad(a), y = cy + Math.sin(a) * ry * f * rad(a);
-      g.fillStyle = `rgba(${i % 4 ? "170,206,92" : "214,232,128"},${0.25 + rnd() * 0.4})`; g.beginPath(); g.arc(x, y, 0.45 + rnd() * rnd() * 1.4, 0, Math.PI * 2); g.fill();
+    // 2b. algae drifted against the edge: a broken, uneven band of small clumps just inside it (never a drawn line)
+    for (let i = 0; i < 240; i++) {
+      const a = rnd() * Math.PI * 2, ex = cx + Math.cos(a) * rx, ey = cy + Math.sin(a) * ry, e = edge(ex, ey), f = e - 0.03 - rnd() * rnd() * 0.12;
+      const gate = sm(0.3, 0.58, grow(cx + Math.cos(a) * rx * 2.6, cy + Math.sin(a) * ry * 2.6));
+      if (rnd() > gate) continue;
+      const x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f, rad = 2.5 + rnd() * 4.5, col = rnd() < 0.5 ? "84,122,48" : "112,148,60";
+      const rg = g.createRadialGradient(x, y, 0, x, y, rad); rg.addColorStop(0, `rgba(${col},0.42)`); rg.addColorStop(1, `rgba(${col},0)`);
+      g.fillStyle = rg; g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
     }
-    // floating filaments (scum strands)
-    g.strokeStyle = "rgba(176,196,104,0.22)"; g.lineCap = "round";
-    for (let i = 0; i < 9; i++) { const a = rnd() * Math.PI * 2, f = rnd() * 0.7, x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f, L = 14 + rnd() * 22; g.lineWidth = 1.5 + rnd() * 2; g.beginPath(); g.moveTo(x - L, y); g.bezierCurveTo(x - L / 3, y - 5, x + L / 3, y + 5, x + L, y - 1); g.stroke(); }
-    g.restore();
-    // rim: algae piling up along the edge, a soft bright band
-    g.save(); blob(1); g.clip(); g.strokeStyle = "rgba(196,222,120,0.16)"; g.lineWidth = 5; blob(1, 0.01); g.stroke();
-    g.strokeStyle = "rgba(214,236,140,0.16)"; g.lineWidth = 1.1; blob(0.985, 0.012); g.stroke(); g.restore();
+    // 3. duckweed: tiny bright specks on the clumps, and a broken scatter drifted up against the zone's edge
+    //    (so the edge of the slow zone reads, without a drawn outline)
+    for (let i = 0; i < 2200; i++) {
+      const a = rnd() * Math.PI * 2, f = Math.sqrt(rnd()) * 1.06, x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f, r = R(x, y), e = edge(x, y);
+      const onClump = sm(0.4, 0.62, grow(x, y)) * (1 - sm(e - 0.1, e, r)), d = r - (e - 0.05);
+      const rim = r < e + 0.01 ? Math.exp(-d * d / 0.003) * sm(0.3, 0.58, grow(cx + Math.cos(a) * rx * 2.6, cy + Math.sin(a) * ry * 2.6)) : 0;
+      if (rnd() > 0.12 + 0.88 * Math.max(onClump * 0.8, rim)) continue;
+      g.fillStyle = `rgba(${i % 4 ? "164,202,88" : "212,232,126"},${0.3 + rnd() * 0.45})`; g.beginPath(); g.arc(x, y, 0.5 + rnd() * rnd() * 1.5, 0, Math.PI * 2); g.fill();
+    }
+    // 4. a few floating filaments (scum strands) on the thicker clumps
+    g.strokeStyle = "rgba(170,196,100,0.22)"; g.lineCap = "round";
+    for (let i = 0, n = 0; i < 40 && n < 8; i++) {
+      const a = rnd() * Math.PI * 2, f = rnd() * 0.7, x = cx + Math.cos(a) * rx * f, y = cy + Math.sin(a) * ry * f;
+      if (grow(x, y) < 0.55) continue; n++;
+      const L = 10 + rnd() * 18, an = rnd() * Math.PI; g.lineWidth = 1.2 + rnd() * 1.8;
+      g.save(); g.translate(x, y); g.rotate(an); g.beginPath(); g.moveTo(-L, 0); g.bezierCurveTo(-L / 3, -4, L / 3, 4, L, -1); g.stroke(); g.restore();
+    }
     c = { cv, x: z.x - M, y: z.y - M, w: z.w + M * 2, h: z.h + M * 2 };
     swampCache.set(key, c);
     return c;
@@ -386,7 +443,7 @@ export function createRenderer(canvas, ui) {
     const tr = ctx.getTransform ? ctx.getTransform() : { a: 1 }, scale = Math.max(0.5, Math.min(4, Math.abs(tr.a)));
     const base = swampBase(z, scale);
     ctx.drawImage(base.cv, base.x, base.y, base.w, base.h);
-    const { cx, cy, rx, ry, seed, rad } = swampShape(z), t = waveT;
+    const { cx, cy, rx, ry, seed } = swampShape(z), t = waveT;
     // a few bubbles rising from the murk
     if (!lowFx) {
       ctx.strokeStyle = "rgba(220,240,200,0.55)"; ctx.lineWidth = 0.9;
@@ -404,7 +461,7 @@ export function createRenderer(canvas, ui) {
     // reed clumps on parts of the rim, swaying, with cattails
     const nClump = Math.max(3, Math.round((z.w + z.h) / 110));
     for (let c = 0; c < nClump; c++) {
-      const a = seed + c * (Math.PI * 2 / nClump) + Math.sin(c * 1.7) * 0.4, f = rad(a) * 0.9, bx = cx + Math.cos(a) * rx * f, by = cy + Math.sin(a) * ry * f;
+      const a = seed + c * (Math.PI * 2 / nClump) + Math.sin(c * 1.7) * 0.4, f = 0.86 + 0.06 * Math.sin(c * 2.3 + seed), bx = cx + Math.cos(a) * rx * f, by = cy + Math.sin(a) * ry * f;
       drawReeds(bx, by, c + Math.round(seed * 10), t);
     }
   }
@@ -458,6 +515,35 @@ export function createRenderer(canvas, ui) {
       }
     }
   }
+  // 2D water: foam lapping at a dock's edge, like the GPU water's — strands of foam that wander in and
+  // out from the edge and break up, built from overlapping dots (three alpha buckets: three fills), plus
+  // a fainter lapping line further out
+  function dockFoam2D(o, seed) {
+    const per = 2 * (o.w + o.h), step = 1.8, t = waveT, ph = seed * 0.013;
+    const lp = (t * 0.4 + (seed % 97) * 0.0037) % 1;
+    const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+    for (let d = 0; d < per; d += step) {
+      let x, y, nx = 0, ny = 0;
+      if (d < o.w) { x = o.x + d; y = o.y; ny = -1; }
+      else if (d < o.w + o.h) { x = o.x + o.w; y = o.y + d - o.w; nx = 1; }
+      else if (d < 2 * o.w + o.h) { x = o.x + o.w - (d - o.w - o.h); y = o.y + o.h; ny = 1; }
+      else { x = o.x; y = o.y + o.h - (d - 2 * o.w - o.h); nx = -1; }
+      const v = (0.5 + 0.5 * Math.sin(d * 0.083 + t * 0.7 + ph) * Math.sin(d * 0.031 - t * 0.45 + ph * 2)) + 0.22 * Math.sin(d * 0.29 + t * 1.3);
+      if (v > 0.46) {
+        const off = 1.2 + 3.6 * (0.5 + 0.5 * Math.sin(d * 0.047 + t * 0.6 + ph * 3)), k = Math.min(1, (v - 0.46) * 2.4), r = 0.8 + 1.4 * k;
+        const b = paths[v > 0.75 ? 2 : v > 0.6 ? 1 : 0]; b.moveTo(x + nx * off + r, y + ny * off); b.arc(x + nx * off, y + ny * off, r, 0, Math.PI * 2);
+        if (!lowFx && ((d / step) | 0) % 2 === 1) { const R2 = r + 1.8; paths[4].moveTo(x + nx * off + R2, y + ny * off); paths[4].arc(x + nx * off, y + ny * off, R2, 0, Math.PI * 2); } // a soft fringe round the strand
+      }
+      if (!lowFx && v > 0.5 && ((d / step) | 0) % 2 === 0) { // the lapping line: thin, broken, spreading out and fading
+        const off = 3 + lp * 9 + Math.sin(d * 0.07 + t) * 0.8; paths[3].moveTo(x + nx * off + 0.8, y + ny * off); paths[3].arc(x + nx * off, y + ny * off, 0.8, 0, Math.PI * 2);
+      }
+    }
+    ctx.fillStyle = "#eef8ff";
+    ctx.globalAlpha = 0.14; ctx.fill(paths[4]);
+    [0.32, 0.5, 0.7].forEach((a, i) => { ctx.globalAlpha = a; ctx.fill(paths[i]); });
+    ctx.globalAlpha = 0.4 * (1 - lp); ctx.fill(paths[3]);
+    ctx.globalAlpha = 1;
+  }
   function drawBrygga(o) {
     const horiz = o.w >= o.h, L = horiz ? o.w : o.h, T = horiz ? o.h : o.w; // along / across
     const seed = Math.round(o.x * 7 + o.y * 13);
@@ -473,32 +559,19 @@ export function createRenderer(canvas, ui) {
       ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 10, o.w, o.h, 3); ctx.fill(); ctx.restore();
     }
     if (!glWater) {
-      ctx.fillStyle = "rgba(0,10,20,0.30)"; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 10, o.w, o.h, 3); ctx.fill();
-      ctx.fillStyle = "rgba(90,60,30,0.12)"; ctx.beginPath(); ctx.roundRect(o.x - 6, o.y - 6, o.w + 12, o.h + 12, 8); ctx.fill();
-      // short pieces of foam along the edges that come and go
-      ctx.strokeStyle = "#eef8ff"; ctx.lineWidth = 1.8; ctx.lineCap = "round";
-      const per = 2 * (o.w + o.h), n = Math.round(per / 15);
-      for (let i = 0; i < n; i++) {
-        const life = 0.5 + 0.5 * Math.sin(waveT * (0.8 + rnd(i + 300)) + i * 2.1);
-        if (life < 0.35) continue;
-        const s = (i + rnd(i + 400) * 0.6) / n * per, len = 5 + rnd(i + 500) * 9, off = 1.5 + rnd(i + 600) * 2.5;
-        let x0, y0, dx = 0, dy = 0;
-        if (s < o.w) { x0 = o.x + s; y0 = o.y - off; dx = 1; }
-        else if (s < o.w + o.h) { x0 = o.x + o.w + off; y0 = o.y + s - o.w; dy = 1; }
-        else if (s < 2 * o.w + o.h) { x0 = o.x + o.w - (s - o.w - o.h); y0 = o.y + o.h + off; dx = -1; }
-        else { x0 = o.x - off; y0 = o.y + o.h - (s - 2 * o.w - o.h); dy = -1; }
-        ctx.globalAlpha = Math.min(1, (life - 0.35) * 1.6) * 0.65;
-        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0 + dx * len, y0 + dy * len); ctx.stroke();
-      }
-      ctx.globalAlpha = 1; ctx.lineCap = "butt";
+      // soft shadow (two offset layers) and a faint warm halo of reflected wood
+      ctx.fillStyle = "rgba(0,10,20,0.16)"; ctx.beginPath(); ctx.roundRect(o.x + 8, o.y + 13, o.w, o.h, 5); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(o.x + 4.5, o.y + 8, o.w, o.h, 3); ctx.fill();
+      if (!lowFx) { ctx.fillStyle = "rgba(120,80,40,0.05)"; for (const e of [4, 8, 12]) { ctx.beginPath(); ctx.roundRect(o.x - e, o.y - e, o.w + e * 2, o.h + e * 2, e + 2); ctx.fill(); } }
+      dockFoam2D(o, seed);
     }
     // pilings: shadow, a churning foam collar and a ripple spreading from each
     for (let i = 0; i < posts.length; i++) {
       const [px, py] = posts[i], rp = (waveT * 0.5 + i * 0.37) % 1;
       ctx.fillStyle = "rgba(0,10,20,0.28)"; ctx.beginPath(); ctx.ellipse(px + pr * 0.45, py + pr * 0.6, pr * 1.25, pr * 1.0, 0, 0, Math.PI * 2); ctx.fill();
       if (!lowFx) { ctx.strokeStyle = `rgba(225,244,252,${0.4 * (1 - rp)})`; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(px, py, pr * (1.3 + rp * 1.4), 0, Math.PI * 2); ctx.stroke(); }
-      ctx.strokeStyle = "rgba(240,250,255,0.7)"; ctx.lineWidth = 1.8; ctx.setLineDash([pr * 0.9, pr * 0.45]); ctx.lineDashOffset = -waveT * 6 - i * 3;
-      ctx.beginPath(); ctx.arc(px, py, pr * 1.18, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(240,250,255,0.7)"; // the collar: three tapered pieces of foam churning round the post
+      for (let k = 0; k < 3; k++) { const c = waveT * 0.9 + k * 2.1 + i * 1.3, len = 0.8 + 0.35 * Math.sin(waveT * 0.8 + k * 1.7 + i); foamArc(px, py, pr * 1.18, pr * 1.18, c - len / 2, c + len / 2, 2.2); }
       ctx.fillStyle = "#3d2612"; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
     }
     // deck: planks laid across the dock — mixed wood tones and grey weathered boards, the odd one missing or cracked
@@ -554,6 +627,14 @@ export function createRenderer(canvas, ui) {
       ctx.stroke(); ctx.lineCap = "butt";
     }
   }
+  // a tapered piece of foam along an ellipse arc (pointed ends, widest in the middle), filled with the current fillStyle
+  function foamArc(cx, cy, rx, ry, a0, a1, w) {
+    const N = Math.max(6, Math.ceil(Math.abs(a1 - a0) * 8));
+    ctx.beginPath();
+    for (let i = 0; i <= N; i++) { const a = a0 + (a1 - a0) * i / N, hw = w * 0.5 * Math.sin(Math.PI * i / N); ctx.lineTo(cx + Math.cos(a) * (rx + hw), cy + Math.sin(a) * (ry + hw)); }
+    for (let i = N; i >= 0; i--) { const a = a0 + (a1 - a0) * i / N, hw = w * 0.5 * Math.sin(Math.PI * i / N); ctx.lineTo(cx + Math.cos(a) * (rx - hw), cy + Math.sin(a) * (ry - hw)); }
+    ctx.closePath(); ctx.fill();
+  }
   // 2D fallback of the GPU whirlpool: a dark funnel, tapered foam arms turning
   // the way the sim pulls (counter-clockwise on screen), a churning rim, a black core.
   function drawWhirl(z) {
@@ -576,9 +657,13 @@ export function createRenderer(canvas, ui) {
       ctx.closePath(); ctx.fillStyle = "rgba(235,247,255,0.72)"; ctx.fill();
       ctx.strokeStyle = "rgba(235,247,255,0.18)"; ctx.lineWidth = 5; ctx.lineJoin = "round"; ctx.stroke();
     }
-    // churning rim, black core with a lit lip on the light side
-    ctx.setLineDash([16, 12, 6, 18]); ctx.lineDashOffset = t * 30; ctx.strokeStyle = "rgba(240,250,255,0.6)"; ctx.lineWidth = 2.6;
-    ctx.beginPath(); ctx.arc(0, 0, R * 0.97, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    // the rim: a broken ring of tapered foam pieces on a slightly wavy radius, drifting round (the shader's look)
+    ctx.fillStyle = "rgba(240,250,255,0.62)";
+    for (let k = 0; k < 7; k++) {
+      const c = k * 0.9 + t * 0.55 + Math.sin(k * 2.3) * 0.3, len = 0.3 + 0.24 * (0.5 + 0.5 * Math.sin(t * 0.7 + k * 1.9)), rr = R * (0.97 + 0.03 * Math.sin(c * 5 + t * 2)), wv = Math.sin(k * 1.3 + t * 0.5);
+      foamArc(0, 0, rr, rr, c - len / 2, c + len / 2, 2.2 + 1.8 * wv * wv);
+    }
+    // black core with a lit lip on the light side
     ctx.fillStyle = "#020b14"; ctx.beginPath(); ctx.arc(0, 0, R * 0.15, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "rgba(195,230,248,0.75)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, R * 0.17, Math.PI * 0.95, Math.PI * 1.75); ctx.stroke();
     if (!lowFx) { ctx.fillStyle = "rgba(230,245,255,0.75)"; for (let i = 0; i < 6; i++) { const ang = -t * 1.5 + i * 1.05; ctx.beginPath(); ctx.arc(Math.cos(ang) * R * 1.02, Math.sin(ang) * R * 1.02, 1.6, 0, Math.PI * 2); ctx.fill(); } }
@@ -597,8 +682,8 @@ export function createRenderer(canvas, ui) {
     // (the GPU water draws these itself, with a wake)
     if (!glWater) {
       ctx.fillStyle = "rgba(3,20,36,0.3)"; ctx.beginPath(); ctx.ellipse(r * 0.16, r * 0.26 + bob, r * 1.06, r * 0.98, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(235,248,255,0.55)"; ctx.lineWidth = 2.2; ctx.setLineDash([r * 0.55, r * 0.2, r * 0.25, r * 0.3]); ctx.lineDashOffset = -waveT * 10 - x * 0.1;
-      ctx.beginPath(); ctx.ellipse(0, bob, r * 1.05, r * 1.02, 0, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(235,248,255,0.55)"; // foam hugging the tube, in churning pieces
+      for (let k = 0; k < 4; k++) { const c = -waveT * 0.6 - x * 0.004 + k * 1.57 + Math.sin(k * 2.1) * 0.3, len = 0.8 + 0.4 * Math.sin(waveT * 0.9 + k * 1.9); foamArc(0, bob, r * 1.05, r * 1.02, c - len / 2, c + len / 2, 2.6); }
       if (!lowFx) {
         const rip = (waveT * 0.9 + x * 0.01) % 1;
         for (let k = 0; k < 2; k++) {
@@ -675,6 +760,20 @@ export function createRenderer(canvas, ui) {
     else { const g = ctx.createRadialGradient(-0.38, -0.42, 0.1, 0, 0, 1.05); g.addColorStop(0, hi(col)); g.addColorStop(0.55, col); g.addColorStop(1, shade(col)); ctx.fillStyle = g; }
     ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill(); ctx.restore();
   }
+  // A swimmer's sink-time gauge (and the red ring while a monster holds it), centred on the origin.
+  // `over`: drawn again above the HUD (hud.js, a swimmer under a panel) — a little bolder, with a halo.
+  function drawGaugeRing(R, frac, ch, t, over) {
+    const hue = 120 * frac, a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * frac, gr = R + 10;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = over ? "rgba(2,22,38,0.62)" : "rgba(2,22,38,0.38)"; ctx.lineWidth = over ? 6 : 4.6; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = `hsla(${hue},85%,60%,${over ? 0.32 : 0.22})`; ctx.lineWidth = 7; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
+    ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = over ? 3 : 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
+    ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = "butt";
+    // danger ring: a monster is holding this swimmer — rises red until eaten
+    if (ch > 0) { ctx.strokeStyle = `rgba(255,70,60,${0.35 + 0.45 * ch})`; ctx.lineWidth = 2 + 4 * ch; ctx.beginPath(); ctx.arc(0, 0, gr + 6 + Math.sin(t * 14) * 1.5 * ch, 0, Math.PI * 2); ctx.stroke(); }
+  }
   function drawSwimmer(s) {
     const R = s.r, bob = Math.sin(s.bob || 0), t = s.bob || 0, id = s.id || 0;
     const frac = s.frac != null ? s.frac : Math.max(0, s.life / s.maxLife);
@@ -696,18 +795,7 @@ export function createRenderer(canvas, ui) {
         ctx.beginPath(); ctx.ellipse(0, R * 0.62, R * (0.95 + rp * 1.4), R * (0.62 + rp * 0.9), 0, 0, Math.PI * 2); ctx.stroke();
       }
     }
-    // sink-time gauge: dark backing (reads on bright water too), soft glow, crisp arc, bright tip
-    const hue = 120 * frac, a0 = -Math.PI / 2, a1 = a0 + Math.PI * 2 * frac, gr = R + 10;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(2,22,38,0.38)"; ctx.lineWidth = 4.6; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(0, 0, gr, 0, Math.PI * 2); ctx.stroke();
-    ctx.strokeStyle = `hsla(${hue},85%,60%,0.22)`; ctx.lineWidth = 7; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
-    ctx.strokeStyle = `hsl(${hue},85%,62%)`; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.arc(0, 0, gr, a0, a1); ctx.stroke();
-    ctx.fillStyle = `hsl(${hue},90%,80%)`; ctx.beginPath(); ctx.arc(Math.cos(a1) * gr, Math.sin(a1) * gr, 2.2, 0, Math.PI * 2); ctx.fill();
-    ctx.lineCap = "butt";
-    // danger ring: a monster is holding this swimmer — rises red until eaten
-    const ch = s.ch != null ? s.ch : Math.min(1, (s.chomp || 0) / EAT_DWELL);
-    if (ch > 0) { ctx.strokeStyle = `rgba(255,70,60,${0.35 + 0.45 * ch})`; ctx.lineWidth = 2 + 4 * ch; ctx.beginPath(); ctx.arc(0, 0, gr + 6 + Math.sin(t * 14) * 1.5 * ch, 0, Math.PI * 2); ctx.stroke(); }
+    drawGaugeRing(R, frac, s.ch != null ? s.ch : Math.min(1, (s.chomp || 0) / EAT_DWELL), t, false);
 
     // --- submerged: kicking legs, refracted and water-tinted ---
     const refr = Math.sin(t * 2) * R * 0.06, kick = Math.sin(t * 2.2);
@@ -838,8 +926,12 @@ export function createRenderer(canvas, ui) {
     }
     ctx.fillStyle = "rgba(222,242,250,0.45)";
     for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(-R * 1.5 - i * R * 0.4, R * 0.45 + Math.sin(t * 2 + i) * 4, 3 - i * 0.45, 0, Math.PI * 2); ctx.fill(); }
-    // waterline ring where the body breaks the surface
-    ctx.strokeStyle = "rgba(230,248,255,0.5)"; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.ellipse(-R * 0.15, R * 0.42, R * 1.15, R * 0.28, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke();
+    // the waterline where the body breaks the surface: churning foam pieces along the belly, the humps and the tail
+    ctx.fillStyle = "rgba(230,248,255,0.55)";
+    for (const [k, ex, ey, erx, ery, a0, a1, w] of [[0, -0.15, 0.4, 1.1, 0.26, 0.06, 0.5, 2.4], [1, -0.15, 0.4, 1.1, 0.26, 0.5, 0.94, 2.4], [2, -1.15, 0.27, 0.52, 0.15, 0.12, 0.88, 1.9], [3, -1.85, 0.12, 0.4, 0.1, 0.15, 0.85, 1.4], [4, 0.55, 0.3, 0.26, 0.1, 0.1, 0.9, 1.6]]) {
+      const j = Math.sin(t * 1.3 + k * 1.9) * 0.06, l = Math.cos(t * 1.1 + k * 2.4) * 0.05;
+      foamArc(ex * R, ey * R, erx * R, ery * R, Math.PI * (a0 + 0.04 + j), Math.PI * (a1 - 0.04 + l), w);
+    }
 
     // tail: tapering S-curve ending in a fluke
     const tw = Math.sin(t * 2.2 - 3.6) * R * 0.24; // the same wave, further down the body
@@ -930,6 +1022,25 @@ export function createRenderer(canvas, ui) {
   }
   function resetBase() { ctx.setTransform(backK, 0, 0, backK, 0, 0); }
 
+  // What the HUD must not hide: swimmers (with their gauge), monsters and the rings, as boxes in canvas coords
+  // around what is drawn of them (hud.js fades the pieces over them and redraws the gauges on top).
+  function occluders(v, f) {
+    const out = [], X = (x) => f.ox + x * f.s, Y = (y) => f.oy + y * f.s;
+    const box = (x0, y0, x1, y1, kind, gauge) => out.push({ x: X(x0), y: Y(y0), w: (x1 - x0) * f.s, h: (y1 - y0) * f.s, kind, gauge });
+    for (const s of v.swimmers) {
+      const R = s.r || 16, y = s.y + Math.sin(s.bob || 0) * 2.6, frac = s.frac != null ? s.frac : Math.max(0, s.life / s.maxLife);
+      const ch = s.ch != null ? s.ch : Math.min(1, (s.chomp || 0) / EAT_DWELL), e = R + 12 + (ch > 0 ? 8 : 0);
+      box(s.x - e, y - e, s.x + e, Math.max(y + e, y + R * 1.9), "swimmer", { x: X(s.x), y: Y(y), s: f.s, R, frac, ch, t: s.bob || 0 });
+    }
+    for (const m of v.monsters || []) {
+      if ((m.sub || 0) > 0.75) continue; // under water: only a dark shape
+      const R = m.r || 30, fc = m.face === undefined ? (Math.cos(m.dir || 0) < 0 ? -1 : 1) : m.face, y = m.y + Math.sin(m.wob || 0) * 2;
+      const a = m.x + (fc >= 0 ? -2.75 : -1.6) * R, b = m.x + (fc >= 0 ? 1.6 : 2.75) * R;
+      box(a, y - 1.75 * R, b, y + 0.95 * R, "monster");
+    }
+    for (const p of v.players) { const r = p.r || 30; box(p.x - r - 9, p.y - r - 26, p.x + r + 9, p.y + r + 9, "ring"); }
+    return out;
+  }
   function render() {
     ({ authoritative, selfId, usingTouch, muted, quitArmedUntil, levelStartScore, saved } = ui.live());
     resetBase();
@@ -938,7 +1049,8 @@ export function createRenderer(canvas, ui) {
     const f = inGame ? fit(v.world.w, v.world.h) : null;
     if (inGame) lowFx = (v.swimmers.length + saved.length) > 18; // lighten shading when crowded
     // the GPU water layer under this canvas (false: no GPU water this frame -> 2D water)
-    glWater = inGame && water.draw({ v, f, t: waveT, lowFx, saved, selfId, selfDash: selfPos.dashActive > 0, SHORE_H, playing: v.phase === Phase.PLAY });
+    const screen = inGame && (v.phase === Phase.CLEARED || v.phase === Phase.OVER || v.phase === Phase.WIN); // (blurred behind a card: hud.js)
+    glWater = inGame && water.draw({ v, f, t: waveT, lowFx, saved, selfId, selfDash: selfPos.dashActive > 0, SHORE_H, playing: v.phase === Phase.PLAY, screen });
     if (glWater) ctx.clearRect(0, 0, CW, CH); else { ctx.fillStyle = "#08222f"; ctx.fillRect(0, 0, CW, CH); }
     if (!v) { hud.wait("Ansluter…"); return; }
     if (v.phase === Phase.LOBBY) { hud.lobby(v); return; }
@@ -955,15 +1067,15 @@ export function createRenderer(canvas, ui) {
     for (const sv of saved) drawSaved(sv);
     if (v.splashes) for (const sp of v.splashes) drawSplash(sp);
     for (const p of v.players) { const you = p.id === selfId; const stunned = you ? selfPos.stun > 0 : !!(p.stunned || p.stun); drawLivboj(p.x, p.y, p.r || 30, p.hue, you && (p.dashActive > 0 || selfPos.dashActive > 0), p.name, you, stunned); }
-    drawSeagulls(v.world.w, waveT);
+    drawSeagulls(v.world.w, v.world.h, shoreY(v.world), waveT);
     drawLightGrade(v.world.w, v.world.h);
     resetBase();
-    hud.game(v); // HUD, buttons, screens (hud.js)
+    hud.game(v, occluders(v, f)); // HUD, buttons, screens (hud.js)
     water.frameDone(); // (the quality ladder weighs the frame time against this CPU time)
   }
   return {
     CW, CH, DASH_BTN: hud.DASH_BTN, MUTE_BTN: hud.MUTE_BTN, QUIT_BTN: hud.QUIT_BTN, fit, toWorld, fitBacking, render, water,
-    actionBtn: hud.actionBtn, leaveBtn: hud.leaveBtn,
+    actionBtn: hud.actionBtn, leaveBtn: hud.leaveBtn, hudSee: hud.see,
     // start of a frame: advance the animation clock; only the screens drawn this frame may be clickable
     beginFrame(dt) { waveT += dt; fitBacking(); hud.beginFrame(dt); },
   };

@@ -3,12 +3,13 @@
 //
 //   node tools/smoke.mjs                 # everything except the live-relay test
 //   node tools/smoke.mjs --live          # also host + join through the live relay (random room code)
-//   node tools/smoke.mjs --only layout,fullscreen,water,keys,board,cache,menu,forslag,live
+//   node tools/smoke.mjs --only layout,fullscreen,water,hud,keys,board,cache,menu,forslag,live
 //   node tools/smoke.mjs --relay ws://localhost:8787 --only live    # against `wrangler dev --local`
 //
 // Checks: no console errors / page errors; layout at the standard sizes (canvas
 // 3:2, inside the viewport, >= 90 % of the limiting side, backing store caps,
-// "Vrid mobilen" in portrait, the fullscreen button clear of the HUD); the menu
+// "Vrid mobilen" in portrait, the fullscreen button clear of the HUD); a swimmer
+// or monster under a HUD piece turns that piece see-through (and back); the menu
 // usable and scrollable on phones; fullscreen by a real click and by F (not
 // while typing); blur releases held keys; the leaderboard outbox (a failed post
 // is queued and flushed exactly once on the next load, a 4xx is dropped);
@@ -267,6 +268,93 @@ if (want("water")) {
     ok(!errors.length, "no console/page errors (ladder)", errors.join(" | "));
     await context.close();
   }
+}
+
+// ---------------------------------------------------------------- the HUD never hides what is in the water
+// A phone (the HUD at its largest), GPU water. game.js is served with one added line that exposes the sim
+// (window.__S) so the test can hold a swimmer / a monster exactly under a HUD piece. Each piece with
+// something under it must turn see-through (hud.js: debug().hud[id].see -> 1, the glass's own pixels thin
+// out), the swimmer's sink gauge must be drawn again above the HUD, and all of it must go back when the
+// water under the HUD is clear again. Same for the DOM fullscreen button (its opacity).
+if (want("hud")) {
+  console.log("hud");
+  const fs = await import("node:fs"), path = await import("node:path");
+  const { ROOT } = await import("./harness.mjs");
+  const gsrc = fs.readFileSync(path.join(ROOT, "game.js"), "utf8"), hook = 'S.phase = mode === "solo" ? Phase.INTRO : Phase.LOBBY;';
+  ok(gsrc.includes(hook), "game.js still has the line the test hooks into");
+  server.overrides.set("/game.js", gsrc.replace(hook, hook + " window.__S = S;"));
+  const { context, page, errors } = await newPage({ w: 844, h: 390, dsf: 2, touch: true });
+  await openMenu(page, "water=gl");
+  await startSolo(page);
+  await page.evaluate(() => { // a touch, so the Spurt button shows (it is only drawn for touch play)
+    const c = document.getElementById("game"), r = c.getBoundingClientRect(), t = new Touch({ identifier: 1, target: c, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+    c.dispatchEvent(new TouchEvent("touchstart", { touches: [t], changedTouches: [t], bubbles: true, cancelable: true }));
+    c.dispatchEvent(new TouchEvent("touchend", { touches: [], changedTouches: [t], bubbles: true, cancelable: true }));
+    window.livboj._jump(5);
+  });
+  await waitPlay(page);
+  // hold the water's contents: `place` is a list of [kind, pieceId, fx, fy] (a point in that HUD piece's rect)
+  await page.evaluate(() => {
+    const S = window.__S;
+    window.__place = []; window.__held = { sw: [], mo: [] };
+    window.__setPlace = (list) => {
+      const d = window.livboj.debug(), f = d.fit, sw = [], mo = [];
+      for (const [kind, id, fx, fy] of list) {
+        const q = d.hud[id], x = ((q.x + q.w * fx) - f.ox) / f.s, y = ((q.y + q.h * fy) - f.oy) / f.s;
+        if (kind === "s") sw.push({ id: 9000 + sw.length, x, y, r: 16, vx: 0, vy: 0, life: 6, maxLife: 10, bob: 0, sk: 0, hr: 0 });
+        else mo.push({ id: 9100 + mo.length, x, y: y + 22, vx: 0, vy: 0, r: 30, wob: 0, dir: 0 });
+      }
+      window.__held = { sw, mo, xy: [...sw, ...mo].map((o) => [o.x, o.y]) };
+    };
+    const hold = () => { // every frame: only what the test placed, where it placed it (nothing sinks, nothing swims off)
+      const h = window.__held, all = [...h.sw, ...h.mo];
+      all.forEach((o, i) => { o.x = h.xy[i][0]; o.y = h.xy[i][1]; o.vx = o.vy = 0; if (o.life != null) o.life = 6; });
+      S.swimmers.length = 0; S.swimmers.push(...h.sw); S.monsters.length = 0; S.monsters.push(...h.mo);
+      requestAnimationFrame(hold);
+    };
+    hold();
+  });
+  const hudNow = () => page.evaluate(() => window.livboj.debug().hud);
+  // the glass's own pixels: alpha of the 2D canvas at a point of a piece with no text or sprite (GPU water: transparent elsewhere)
+  const glassAlpha = (id, fx, fy) => page.evaluate(([id, fx, fy]) => {
+    const c = document.getElementById("game"), q = window.livboj.debug().hud[id], k = c.width / 900;
+    return c.getContext("2d").getImageData(Math.round((q.x + q.w * fx) * k), Math.round((q.y + q.h * fy) * k), 1, 1).data[3];
+  }, [id, fx, fy]);
+  await sleep(900);
+  let h = await hudNow();
+  const ids = ["level", "goal", "score", "quit", "dash", "mute"];
+  ok(ids.every((k) => h[k] && h[k].see < 0.05), "nothing under the HUD: every piece solid", ids.map((k) => `${k} ${h[k] && h[k].see}`).join(", "));
+  const solidA = await glassAlpha("score", 0.93, 0.5);
+  ok(solidA > 150, "…the score panel's glass is opaque-ish", `alpha ${solidA}`);
+  // a swimmer under the score panel (left part), a monster under the centre panel, a swimmer under Spurt
+  await page.evaluate(() => window.__setPlace([["s", "score", 0.3, 0.6], ["m", "goal", 0.35, 0.9], ["s", "dash", 0.5, 0.5]]));
+  await sleep(700);
+  h = await hudNow();
+  ok(h.score.see > 0.85 && h.score.hit, "a swimmer under the score panel: it turns see-through", `see ${h.score.see}`);
+  ok(h.goal.see > 0.85, "a monster under the centre panel: it turns see-through", `see ${h.goal.see}`);
+  ok(h.dash.see > 0.85, "a swimmer under the Spurt button: it turns see-through", `see ${h.dash.see}`);
+  ok(h.level.see < 0.05 && h.mute.see < 0.05, "…the pieces with nothing under them stay solid", `level ${h.level.see}, mute ${h.mute.see}`);
+  ok(h._gauges === 2, "…both swimmers' sink gauges are drawn again above the HUD", `gauges ${h._gauges}`);
+  const seeA = await glassAlpha("score", 0.93, 0.5);
+  ok(seeA < solidA * 0.45, "…and the panel's glass really is thin now (canvas pixels)", `alpha ${solidA} -> ${seeA}`);
+  // under the quit button and the fullscreen button (DOM: its opacity)
+  await page.evaluate(() => window.__setPlace([["s", "quit", 0.5, 0.5], ["s", "fs", 0.5, 0.4]]));
+  await sleep(700);
+  h = await hudNow();
+  const fsOp = await page.evaluate(() => getComputedStyle(document.getElementById("fsBtn")).opacity);
+  ok(h.quit.see > 0.85 && h.score.see < 0.6, "a swimmer under 'Avsluta spelet': it turns see-through, the score panel comes back", `quit ${h.quit.see}, score ${h.score.see}`);
+  ok(h.fs && h.fs.see > 0.85 && +fsOp < 0.6, "a swimmer under the fullscreen button: the DOM button fades too", `see ${h.fs && h.fs.see}, opacity ${fsOp}`);
+  // clear water: everything comes back
+  await page.evaluate(() => window.__setPlace([]));
+  await sleep(1500);
+  h = await hudNow();
+  const fsOp2 = await page.evaluate(() => getComputedStyle(document.getElementById("fsBtn")).opacity);
+  ok(ids.every((k) => h[k].see < 0.05) && +fsOp2 > 0.99 && h._gauges === 0, "water clear again: every piece back to solid", ids.map((k) => `${k} ${h[k].see}`).join(", ") + `, fs opacity ${fsOp2}`);
+  const tap = await page.evaluate(() => { const b = window.livboj.debug().dashBtn; return b.r > 40; });
+  ok(tap, "the Spurt button keeps its thumb size (hit area unchanged)");
+  ok(!errors.length, "no console/page errors", errors.join(" | "));
+  await context.close();
+  server.overrides.delete("/game.js");
 }
 
 // ---------------------------------------------------------------- held keys

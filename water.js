@@ -156,7 +156,8 @@ void main() {
   col *= 1.0 + 0.045 * sin(q.y * 0.022 + sin(q.x * 0.006 + t * 0.2) * 2.0 - t * 0.5) * (1.0 - wet);
 
   // ---- surface: caustic network, wave marks, sun
-  float calm = (1.0 - damp * 0.75) * (1.0 - wet) * (1.0 - core);
+  float calm = (1.0 - damp * 0.8) * (1.0 - wet) * (1.0 - core);   // (waves: still in a swamp)
+  float clear = (1.0 - damp * 0.3) * (1.0 - wet) * (1.0 - core);  // (caustics: still show through the algae)
   // the cell edges are bent by two warps (broad drift + a finer wobble), so the network is round and organic
   vec2 wq = q + vec2(vn(q / 90.0 + t * 0.05), vn(q / 90.0 + 7.0 - t * 0.05)) * 16.0;
   wq += vec2(sin(wq.y * 0.21 + t * 0.6) + sin(wq.y * 0.083 - wq.x * 0.05), sin(wq.x * 0.19 - t * 0.5) + sin(wq.x * 0.077 + wq.y * 0.06)) * 3.2;
@@ -209,6 +210,16 @@ void main() {
     if (kind > 1.5) under = max(under, sub * (1.0 - smoothstep(0.4, 1.0, length((rel - vec2(-0.25 * r * b.w, 0.3 * r)) / (vec2(1.75, 0.8) * r)))));
     // waterline foam, broken and churning
     float ed = length(lr / fr), ang = atan(lr.y, lr.x);
+    if (kind > 1.5) {            // a monster's waterline follows its body: neck base, belly, the humps and the tail
+      vec2 m = vec2(rel.x * b.w, rel.y) / r;  // its own frame, head to +x, in body radii
+      // (approximate distances in body radii: each ellipse's normalised distance times its short radius)
+      float d = (length((m - vec2(-0.15, 0.36)) / vec2(1.02, 0.3)) - 1.0) * 0.3;
+      d = min(d, (length((m - vec2(0.55, 0.26)) / vec2(0.3, 0.16)) - 1.0) * 0.16);
+      d = min(d, (length((m - vec2(-1.05, 0.26)) / vec2(0.5, 0.2)) - 1.0) * 0.2);
+      d = min(d, (length((m - vec2(-1.75, 0.12)) / vec2(0.45, 0.13)) - 1.0) * 0.13);
+      d += (vn(vec2(m.x * 3.0 + t * 0.8, m.y * 4.0 + fi)) - 0.5) * 0.12;   // an uneven, churning edge
+      ed = 1.0 + d;
+    }
     float brk = 0.45 + 0.55 * vn(vec2(ang * 3.0 + fi * 7.0, t * 1.6 + fi));
     float band = 1.0 - smoothstep(0.0, (2.2 + aa) / length(fr) * 1.4, abs(ed - 1.0));
     foam = max(foam, band * brk * up * 0.9);
@@ -240,16 +251,22 @@ void main() {
     if (abs(rel.x) > hb.x + 30.0 || abs(rel.y) > hb.y + 30.0) continue;
     float sd0 = sdBox(rel, hb), sds = sdBox(rel - vec2(8.0, 13.0), hb), fi = float(i);
     shadow = max(shadow, (1.0 - smoothstep(-4.0, 8.0, sds)) * 0.95);
-    float brk = smoothstep(0.3, 0.75, vn(vec2((rel.x + rel.y) * 0.11 - t * 0.6, fi * 3.0 + t * 0.3)));
-    foam = max(foam, (1.0 - smoothstep(0.2, 1.8 + aa, abs(sd0 - 1.2 - brk * 1.2))) * brk * 0.6);
+    // lapping foam: strands that wander in and out from the edge, thicken, thin and break (not a neat rectangle),
+    // a few specks drifting further out, and a broken lapping line spreading away
+    vec2 nq = rel * 0.085 + vec2(fi * 7.1, fi * 3.3);
+    float n1 = vn(nq + vec2(t * 0.35, -t * 0.27)), n2 = vn(nq * 2.3 - vec2(t * 0.5, t * 0.4) + 11.0);
+    float brk = smoothstep(0.36, 0.68, n1), off = 0.5 + 4.2 * n2, wid = 0.45 + 1.8 * n1 * n1;
+    foam = max(foam, (1.0 - smoothstep(wid * 0.35, wid + aa, abs(sd0 - off))) * brk * 0.72);
+    vec2 sp = rel + vec2(sin(t * 0.7 + fi) * 2.0, t * 1.1), cid = floor(sp / 4.5), cf = fract(sp / 4.5) - 0.2 - h22(cid + fi * 5.0) * 0.6;
+    foam = max(foam, (1.0 - smoothstep(0.07, 0.15 + aa / 4.5, length(cf))) * step(0.7, h12(cid + fi * 13.0)) * smoothstep(0.5, 1.5, sd0) * (1.0 - smoothstep(3.0, 9.0, sd0)) * 0.5);
     float lp = fract(t * 0.4 + fi * 0.37);
-    foam = max(foam, (1.0 - smoothstep(0.0, 0.9 + aa, abs(sd0 - 3.0 - lp * 9.0))) * (1.0 - lp) * 0.28 * brk);
+    foam = max(foam, (1.0 - smoothstep(0.0, 0.9 + aa, abs(sd0 - 3.0 - lp * 9.0 - n2 * 2.0))) * (1.0 - lp) * 0.28 * smoothstep(0.45, 0.7, n2));
     float wob = sin(p.x * 0.23 + t * 2.0) * 1.3 + sin(p.y * 0.19 - t * 1.6) * 1.3;
     refl = max(refl, (1.0 - smoothstep(1.0, 14.0, sd0 + wob)) * step(0.0, sd0));
   }
 
   // ---- compose
-  float lightK = (1.0 - shadow * 0.85) * calm;
+  float lightK = (1.0 - shadow * 0.85) * clear;
   col = mix(col, col * vec3(0.93, 0.78, 0.62), refl * 0.35);                   // warm wood colour on the water
   col = mix(col, vec3(0.02, 0.13, 0.22), sh1 * 0.2 * calm + sh2 * 0.14 * calm);    // wave troughs
   col = mix(col, vec3(0.70, 0.92, 0.97), caus * (0.2 + 0.16 * shallow) * lightK); // refracted sunlight
@@ -284,8 +301,9 @@ let glClaimed = false; // never more than one WebGL context per page
  * The water for one game canvas. -> {
  *   draw(scene) -> true when the GPU layer drew this frame (render.js then skips its 2D water)
  *   info()      -> { mode, level, size, avgMs } for tests
+ *   layer()     -> the GPU canvas while it draws the water (hud.js blurs it behind the screens), else null
  * }
- * scene = { v, f, t, lowFx, saved, selfId, selfDash, CW, CH, playing }
+ * scene = { v, f, t, lowFx, saved, selfId, selfDash, SHORE_H, playing, screen }
  */
 export function createWater(canvas2d, CW, CH) {
   const coarse = matchMedia("(pointer: coarse)");
@@ -403,7 +421,8 @@ export function createWater(canvas2d, CW, CH) {
     const cssW = canvas2d.clientWidth;
     if (!cssW) return false;
     // soft content: its own (lower) resolution cap
-    const k = Math.min(window.devicePixelRatio || 1, 1.25) * [1, 0.75, 0.6][level]; // (width capped below: 1400 on touch devices, 1920 elsewhere)
+    // (behind a level / end screen the water is only seen blurred — hud.js reads this layer back — so half the pixels do)
+    const k = Math.min(window.devicePixelRatio || 1, 1.25) * [1, 0.75, 0.6][level] * (sc.screen ? 0.5 : 1); // (width capped below: 1400 on touch devices, 1920 elsewhere)
     const gw = Math.max(64, Math.round(Math.min(cssW * k, coarse.matches ? 1400 : 1920))), gh = Math.round(gw * CH / CW);
     if (glc.width !== gw || glc.height !== gh) { glc.width = gw; glc.height = gh; graceUntil = now + 1000; }
     if (size[0] !== gw || size[1] !== gh) size = [gw, gh];
@@ -457,6 +476,7 @@ export function createWater(canvas2d, CW, CH) {
 
   return {
     draw, frameDone,
+    layer: () => (active && level < 3 && gl && !gl.isContextLost() ? glc : null),
     info: () => ({ mode: active && level < 3 ? "gl" : "2d", level, forced: FORCE, size, avgMs: Math.round(avgMs * 10) / 10, avgCpu: Math.round(avgCpu * 10) / 10, nObj, glCanvas: !!glc }),
     // tests: force the next step down now
     _stepDown: () => stepDown(performance.now()),
@@ -528,8 +548,14 @@ export function drawWater2D(ctx, w, h, shore, t, lowFx, pxPerUnit) {
     ctx.fillRect(0, 0, (w + span * 2) / k, (shore + span * 2) / k); ctx.restore();
   }
   ctx.globalCompositeOperation = "source-over";
-  // wave marks: the shader's crest arcs, as strokes
+  // wave marks: the shader's crest arcs, as tapered crescents (thick in the middle, pointed ends)
   ctx.lineCap = "round";
+  const crescent = (x0, x1, y, sag, w, col) => {
+    const N = 10; ctx.fillStyle = col; ctx.beginPath();
+    for (let i = 0; i <= N; i++) { const u = i / N, k = 2 * u - 1; ctx.lineTo(x0 + (x1 - x0) * u, y + sag * k * k - w * 0.5 * Math.sin(Math.PI * u)); }
+    for (let i = N; i >= 0; i--) { const u = i / N, k = 2 * u - 1; ctx.lineTo(x0 + (x1 - x0) * u, y + sag * k * k + w * 0.5 * Math.sin(Math.PI * u)); }
+    ctx.closePath(); ctx.fill();
+  };
   const rows = (S, L, seed, alpha, tt) => {
     for (let row = Math.floor(-S / S); row * S < shore; row++) {
       const hr = h12(row, seed), off = hr * L + tt * (4 + 6 * hr);
@@ -544,10 +570,10 @@ export function drawWater2D(ctx, w, h, shore, t, lowFx, pxPerUnit) {
         const wav = Math.sin(((x0 + x1) / 2) * 0.019 + tt * 0.8) * 3;
         const y = yc - wav;
         if (y > shore - 30) continue;
-        ctx.strokeStyle = `rgba(5,33,56,${0.16 * pres * alpha})`; ctx.lineWidth = 4.5;
-        ctx.beginPath(); ctx.moveTo(x0 + 4, y + sag + 3.5); ctx.quadraticCurveTo((x0 + x1) / 2, y - sag + 3.5, x1 - 4, y + sag + 3.5); ctx.stroke();
-        ctx.strokeStyle = `rgba(247,250,240,${0.5 * pres * alpha})`; ctx.lineWidth = 2.2;
-        ctx.beginPath(); ctx.moveTo(x0, y + sag); ctx.quadraticCurveTo((x0 + x1) / 2, y - sag, x1, y + sag); ctx.stroke();
+        // each mark its own weight and brightness, tapered to points like the shader's (no uniform strokes)
+        const wmax = (1.1 + 1.9 * h2 * h2) * (0.75 + 0.5 * hh), lit = 0.3 + 0.32 * h3;
+        crescent(x0 + 4, x1 - 4, y + 3.2, sag, wmax * 2.2, `rgba(5,33,56,${0.12 * pres * alpha})`);
+        crescent(x0, x1, y, sag, wmax, `rgba(247,250,240,${lit * pres * alpha})`);
       }
     }
   };

@@ -41,11 +41,18 @@ const QUIT_ARM_MS = 3000;  // game.js pressQuit: the second tap must come within
 const CONF = ["#ffb020", "#e5484d", "#3aa0ff", "#22c55e", "#ec4899", "#f4f4f0"];
 
 /**
- * deps: { CW, CH, mode, myName, netSummary(), selfPos, live(), drawRing(x, y, r, hue, glow) }
+ * deps: { CW, CH, mode, myName, netSummary(), selfPos, live(), drawRing(x, y, r, hue, glow),
+ *         drawGauge(o) (a swimmer's sink gauge again, on top of the HUD), underlay() (the GPU water canvas or null) }
  * The button objects (MUTE_BTN, DASH_BTN, QUIT_BTN) are laid out again every
  * frame and changed in place, so game.js's hit tests always see the drawn size.
+ *
+ * See-through: the world fills the whole canvas, so swimmers, monsters and rings
+ * pass under the HUD. game(v, occ) gets their boxes in canvas coords; every HUD
+ * piece with something under it fades (per piece, animated) to a faint outline
+ * while its text keeps a dark halo, and a swimmer under any piece gets its sink
+ * gauge drawn again above the HUD — a hidden swimmer would be an unfair miss.
  */
-export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfPos, live, drawRing }) {
+export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfPos, live, drawRing, drawGauge, underlay }) {
   let u = 1;     // UI scale (>= 1 on small canvases)
   let Q = 1;     // the scale of what is being drawn right now (u in the HUD, 1 inside a screen)
   let dk = 1;    // device px per logical px (for shadow blur, which ignores the transform)
@@ -57,6 +64,21 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
   const QUIT_BTN = { x: 0, y: 0, w: 0, h: 0 }; // the hit area (a little larger than the drawn pill)
   let quitBox = { x: 0, y: 0, w: 0, h: 0 };
   let ACTION_BTN = null, LEAVE_BTN = null;
+  // ---- see-through (occlusion) state ----
+  let occ = [], frameDt = 0.016, HALO = 0;
+  const seeAnim = new Map();   // piece id -> 0 (solid) … 1 (see-through)
+  const seeRects = {};         // piece id -> its rect this frame (canvas coords): debug() and the smoke test read it
+  const under = new Set();     // occluders under some HUD piece this frame
+  let fsEl, fsOp = "";
+  /** How see-through the HUD piece `id` (rect r, canvas coords) is this frame: fades out fast, back in slowly. */
+  function see(id, r) {
+    let hit = false;
+    for (const o of occ) if (o.x < r.x + r.w && o.x + o.w > r.x && o.y < r.y + r.h && o.y + o.h > r.y) { hit = true; under.add(o); }
+    const s0 = seeAnim.get(id) || 0, s = s0 + ((hit ? 1 : 0) - s0) * Math.min(1, frameDt * (hit ? 11 : 3.5));
+    seeAnim.set(id, s < 0.002 ? 0 : s);
+    seeRects[id] = { x: r.x, y: r.y, w: r.w, h: r.h, see: +s.toFixed(3), hit };
+    return s;
+  }
   const anim = { caught: 0, level: -1, score: null, pop: 0, missed: null, flash: 0, ready: true, ping: 0, phase: null, phaseT: 0 };
 
   // ---- pointer, for pressed / hover looks only (game.js does the hit tests) ----
@@ -97,24 +119,36 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
   }
   function tw(s, f) { ctx.font = f; return ctx.measureText(s).width; }
-  function text(s, x, y, f, col, align = "left", base = "alphabetic") { ctx.font = f; ctx.fillStyle = col; ctx.textAlign = align; ctx.textBaseline = base; ctx.fillText(s, x, y); }
+  function text(s, x, y, f, col, align = "left", base = "alphabetic") {
+    ctx.font = f; ctx.textAlign = align; ctx.textBaseline = base;
+    if (HALO > 0.02) { // over a see-through panel: a dark outline keeps the text readable on bright water
+      ctx.save(); ctx.lineJoin = "round"; ctx.lineWidth = 3.4 * Q; ctx.strokeStyle = `rgba(3,18,30,${0.78 * HALO})`; ctx.strokeText(s, x, y); ctx.restore();
+    }
+    ctx.fillStyle = col; ctx.fillText(s, x, y);
+  }
+  /** Icons on a see-through panel: a soft dark shadow under them (the text has its outline). */
+  function haloOn() { if (HALO > 0.02) { ctx.save(); ctx.shadowColor = `rgba(3,18,30,${0.9 * HALO})`; ctx.shadowBlur = 3 * Q * dk; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0; return true; } return false; }
   function fitText(s, f, max) { ctx.font = f; if (ctx.measureText(s).width <= max) return s; let a = s; while (a.length > 1 && ctx.measureText(a + "…").width > max) a = a.slice(0, -1); return a.trimEnd() + "…"; }
   const shadow = (blur, dy = 0, col = "rgba(0,8,16,0.4)") => { ctx.shadowColor = col; ctx.shadowBlur = blur * dk * SK; ctx.shadowOffsetY = dy * dk * SK; ctx.shadowOffsetX = 0; };
   /** The UI's one surface: deep-sea glass with a lit top edge and a hairline rim. */
+  // o.see (0..1): something is under this piece — the glass thins to a faint tinted outline
   function glass(x, y, w, h, r, o = {}) {
-    const a = o.alpha != null ? o.alpha : 0.72;
+    const sv = o.see || 0, keep = 1 - sv;
+    const a = (o.alpha != null ? o.alpha : 0.72) * (1 - 0.86 * sv);
     ctx.save();
-    shadow(14 * Q, 3 * Q, `rgba(0,8,16,${0.42 * Math.min(1, a + 0.2)})`);
+    if (keep > 0.05) shadow(14 * Q, 3 * Q, `rgba(0,8,16,${0.42 * Math.min(1, a + 0.2) * keep})`);
     const g = ctx.createLinearGradient(0, y, 0, y + h);
-    g.addColorStop(0, `rgba(18,56,78,${a})`); g.addColorStop(1, `rgba(5,24,37,${Math.min(1, a + 0.1)})`);
+    g.addColorStop(0, `rgba(18,56,78,${a})`); g.addColorStop(1, `rgba(5,24,37,${Math.min(1, a + 0.1 * keep)})`);
     rr(x, y, w, h, r); ctx.fillStyle = g; ctx.fill();
     ctx.restore();
     ctx.save(); rr(x, y, w, h, r); ctx.clip();
-    const sh = Math.min(h * 0.5, 20 * Q), s = ctx.createLinearGradient(0, y, 0, y + sh);
-    s.addColorStop(0, "rgba(255,255,255,0.10)"); s.addColorStop(1, "rgba(255,255,255,0)"); ctx.fillStyle = s; ctx.fillRect(x, y, w, sh);
-    if (o.tint) { ctx.fillStyle = o.tint; ctx.fillRect(x, y, w, h); }
+    if (keep > 0.05) { const sh = Math.min(h * 0.5, 20 * Q), s = ctx.createLinearGradient(0, y, 0, y + sh);
+      s.addColorStop(0, `rgba(255,255,255,${0.10 * keep})`); s.addColorStop(1, "rgba(255,255,255,0)"); ctx.fillStyle = s; ctx.fillRect(x, y, w, sh); }
+    if (o.tint) { ctx.globalAlpha = 1 - 0.5 * sv; ctx.fillStyle = o.tint; ctx.fillRect(x, y, w, h); }
     ctx.restore();
-    rr(x + 0.5, y + 0.5, w - 1, h - 1, r - 0.5); ctx.strokeStyle = o.stroke || "rgba(190,230,250,0.20)"; ctx.lineWidth = o.lw || 1; ctx.stroke();
+    rr(x + 0.5, y + 0.5, w - 1, h - 1, r - 0.5); ctx.lineWidth = o.lw || 1;
+    if (sv > 0.02 && !o.stroke) { ctx.strokeStyle = `rgba(3,18,30,${0.35 * sv})`; ctx.lineWidth = (o.lw || 1) + 2 * Q * sv; ctx.stroke(); ctx.lineWidth = o.lw || 1; } // dark under the hairline: the outline reads on bright water
+    ctx.strokeStyle = o.stroke || `rgba(190,230,250,${0.20 + 0.25 * sv})`; ctx.stroke();
   }
   /** A filled, glossy pill or disc in one colour family (primary orange / danger red). */
   function solid(x, y, w, h, r, top, bottom, glow) {
@@ -223,17 +257,19 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
 
   // ---- buttons: one family (solid primary / glass secondary / red danger, all pills or discs) --------
   /** Draw a pill button with an icon and a label. r = rect in the current (screen) coords; hit = mapped rect. */
-  function pill(r, label, ico, kind, fpx, st, extra) {
+  function pill(r, label, ico, kind, fpx, st, extra, sv = 0) {
     const { x, y, w, h } = r, cx = x + w / 2, cy = y + h / 2, sc = st.pressed ? 0.95 : st.hover ? 1.03 : 1;
     ctx.save(); ctx.translate(cx, cy); ctx.scale(sc, sc); ctx.translate(-cx, -cy);
+    if (kind !== "glass") ctx.globalAlpha = 1 - 0.6 * sv;
     if (kind === "primary") solid(x, y, w, h, h / 2, st.hover ? "#ff8f57" : "#ff7a3d", st.pressed ? "#c93c0b" : "#e2470f", "rgba(244,87,29,0.5)");
     else if (kind === "danger") solid(x, y, w, h, h / 2, "#ff6a5c", "#d22f2f", "rgba(229,72,77,0.55)");
-    else glass(x, y, w, h, h / 2, { alpha: st.hover ? 0.82 : 0.68, stroke: st.hover ? "rgba(220,240,255,0.45)" : "rgba(190,230,250,0.28)" });
+    else glass(x, y, w, h, h / 2, { alpha: st.hover ? 0.82 : 0.68, stroke: sv > 0.02 ? undefined : st.hover ? "rgba(220,240,255,0.45)" : "rgba(190,230,250,0.28)", see: sv });
     if (extra) extra(x, y, w, h);
+    ctx.globalAlpha = 1;
     const f = uiFont(kind === "primary" ? 700 : 600, fpx), lw = tw(label, f), is = fpx * 1.15, gap = ico ? fpx * 0.45 : 0, total = (ico ? is + gap : 0) + lw;
     let lx = cx - total / 2;
     const col = "#ffffff";
-    if (ico) { ico(lx + is / 2, cy, is, col); lx += is + gap; }
+    if (ico) { const hs = haloOn(); ico(lx + is / 2, cy, is, col); if (hs) ctx.restore(); lx += is + gap; }
     ctx.save(); if (kind !== "glass") shadow(3 * Q, 1 * Q, "rgba(80,20,0,0.35)");
     text(label, lx, cy + fpx * 0.05, f, col, "left", "middle"); ctx.restore();
     ctx.restore();
@@ -261,12 +297,27 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
   const leaveWidth = () => Math.ceil(tw("Till startsidan", uiFont(600, 16)) + 16 * 1.6 + 44);
   const actionWidth = (label) => Math.ceil(tw(label, uiFont(700, 19)) + 19 * 1.6 + 60);
 
-  function drawMute() {
+  function drawMute(game) {
     const b = MUTE_BTN, st = stateOf((p) => inC(p, b, 8)), sc = st.pressed ? 0.92 : st.hover ? 1.05 : 1;
+    const sv = game ? see("mute", { x: b.x - b.r, y: b.y - b.r, w: b.r * 2, h: b.r * 2 }) : 0;
     ctx.save(); ctx.translate(b.x, b.y); ctx.scale(sc, sc);
-    glass(-b.r, -b.r, b.r * 2, b.r * 2, b.r, { alpha: st.hover ? 0.8 : 0.66, stroke: L.muted ? "rgba(255,140,128,0.55)" : "rgba(190,230,250,0.30)", tint: L.muted ? "rgba(229,72,77,0.16)" : null });
+    glass(-b.r, -b.r, b.r * 2, b.r * 2, b.r, { alpha: st.hover ? 0.8 : 0.66, stroke: L.muted ? "rgba(255,140,128,0.55)" : sv > 0.02 ? undefined : "rgba(190,230,250,0.30)", tint: L.muted ? "rgba(229,72,77,0.16)" : null, see: sv });
+    HALO = sv; const hs = haloOn();
     icon.speaker(-1 * u, 0, b.r * 1.1, !L.muted, L.muted ? "#ffd2cc" : "#ffffff");
+    if (hs) ctx.restore(); HALO = 0;
     ctx.restore();
+  }
+  /** The DOM fullscreen button beside the mute button (index.html / host.html): the same see-through, through its opacity. */
+  function seeFs() {
+    if (fsEl === undefined) fsEl = document.getElementById("fsBtn");
+    if (!fsEl) return;
+    let sv = 0;
+    if (!fsEl.hidden) {
+      const c = canvas.getBoundingClientRect(), b = fsEl.getBoundingClientRect(), k = CW / (c.width || 1);
+      if (b.width > 0 && b.bottom <= c.bottom + 1) sv = see("fs", { x: (b.left - c.left) * k, y: (b.top - c.top) * k, w: b.width * k, h: b.height * k });
+    }
+    const op = sv > 0.01 ? (1 - 0.62 * sv).toFixed(2) : "";
+    if (op !== fsOp) { fsOp = op; fsEl.style.opacity = op; }
   }
   function drawDash(v) {
     if (!(L.usingTouch && v.phase === Phase.PLAY)) { anim.ready = true; return; }
@@ -277,7 +328,9 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     if (ready && !anim.ready) anim.ping = 1;
     anim.ready = ready;
     const b = DASH_BTN, st = stateOf((p) => inC(p, b)), down = active || st.pressed, R = b.r;
-    ctx.save(); ctx.translate(b.x, b.y);
+    // something under the big thumb button: it thins out (the press look stays), the swimmer's gauge is drawn over it
+    const sv = see("dash", { x: b.x - R, y: b.y - R, w: R * 2, h: R * 2 }) * (down ? 0.5 : 1);
+    ctx.save(); ctx.translate(b.x, b.y); ctx.globalAlpha = 1 - 0.58 * sv;
     if (anim.ping > 0) { ctx.globalAlpha = anim.ping * 0.8; ctx.strokeStyle = C.accentHi; ctx.lineWidth = 3 * u; ctx.beginPath(); ctx.arc(0, 0, R * (1.02 + 0.3 * (1 - anim.ping)), 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1; }
     ctx.scale(down ? 0.92 : 1, down ? 0.92 : 1);
     if (ready) solid(-R, -R, R * 2, R * 2, R, down ? "#ffa06a" : "#ff7a3d", "#d8410c", down ? "rgba(255,170,110,0.9)" : "rgba(244,87,29,0.55)");
@@ -288,9 +341,12 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
       ctx.strokeStyle = "rgba(255,255,255,0.13)"; ctx.lineWidth = 5 * u; ctx.beginPath(); ctx.arc(0, 0, ar, 0, Math.PI * 2); ctx.stroke();
       ctx.strokeStyle = C.accentHi; ctx.beginPath(); ctx.arc(0, 0, ar, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke();
     }
-    ctx.globalAlpha = ready ? 1 : 0.55;
+    ctx.globalAlpha = (ready ? 1 : 0.55) * (1 - 0.25 * sv);
+    HALO = sv; const hs = haloOn();
     icon.bolt(0, -R * 0.2, R * 0.5, "#ffffff");
-    ctx.save(); if (ready) shadow(3 * u, 1 * u, "rgba(80,20,0,0.4)"); text("Spurt", 0, R * 0.38, uiFont(700, 15 * u), "#ffffff", "center", "middle"); ctx.restore();
+    if (hs) ctx.restore();
+    ctx.save(); if (ready && sv < 0.02) shadow(3 * u, 1 * u, "rgba(80,20,0,0.4)"); text("Spurt", 0, R * 0.38, uiFont(700, 15 * u), "#ffffff", "center", "middle"); ctx.restore();
+    HALO = 0;
     ctx.restore();
   }
   function drawQuit(v) {
@@ -301,10 +357,13 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     }
     const now = performance.now(), armed = L.quitArmedUntil > now, st = stateOf((p) => inR(p, QUIT_BTN));
     const left = armed ? Math.max(0, (L.quitArmedUntil - now) / QUIT_ARM_MS) : 0;
+    const sv = v.phase === Phase.CLEARED ? 0 : see("quit", quitBox) * (st.hover || st.pressed ? 0.3 : 1);
+    HALO = sv;
     pill(quitBox, armed ? "Säker? Tryck igen" : "Avsluta spelet", armed ? icon.warn : icon.exit, armed ? "danger" : "glass", 13 * u, st, armed ? (x, y, w, h) => {
       // the time left to confirm: a bar draining along the bottom edge
       ctx.save(); rr(x, y, w, h, h / 2); ctx.clip(); ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fillRect(x, y + h - 3 * u, w * left, 3 * u); ctx.restore();
-    } : null);
+    } : null, sv);
+    HALO = 0;
   }
 
   // ---- HUD -----------------------------------------------------------------
@@ -319,22 +378,26 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     const shake = anim.flash > 0 ? Math.sin(t * 60) * 3 * u * anim.flash : 0;
     const LW = 164 * u, lx = T + shake;
     const danger = crit || warn;
+    let sv = see("level", { x: T, y: T, w: LW, h: PH });
     glass(lx, T, LW, PH, R, {
       stroke: danger || anim.flash > 0 ? `rgba(255,95,90,${Math.max(0.45 + 0.45 * pulse, anim.flash)})` : undefined, lw: danger ? 1.6 * u : 1,
-      tint: danger || anim.flash > 0 ? `rgba(229,60,60,${Math.max(0.12 + 0.16 * pulse, anim.flash * 0.35)})` : null,
+      tint: danger || anim.flash > 0 ? `rgba(229,60,60,${Math.max(0.12 + 0.16 * pulse, anim.flash * 0.35)})` : null, see: sv,
     });
-    icon.ring(lx + 19 * u, T + 14.5 * u, 15 * u);
+    HALO = sv;
+    let hs = haloOn(); icon.ring(lx + 19 * u, T + 14.5 * u, 15 * u); if (hs) ctx.restore();
     text(`Nivå ${h.level + 1}/${BASE_LEVELS.length}`, lx + 33 * u, T + 20.5 * u, uiFont(600, 17 * u), C.ink);
     const mcol = crit || warn ? C.badHi : amber ? "#ffc56b" : "#ffd7c7", mf = uiFont(600, 12.5 * u), ml = `Missade ${missed}/${allowed}`;
     let mx = lx + 12 * u;
-    if (danger) { icon.warn(mx + 6 * u, T + 34.5 * u, 12 * u, crit ? `rgba(255,${90 + 60 * pulse},80,1)` : "#ff7a6a"); mx += 15 * u; }
+    if (danger) { hs = haloOn(); icon.warn(mx + 6 * u, T + 34.5 * u, 12 * u, crit ? `rgba(255,${90 + 60 * pulse},80,1)` : "#ff7a6a"); if (hs) ctx.restore(); mx += 15 * u; }
     text(ml, mx, T + 39 * u, mf, mcol);
     // the misses meter: one slot per allowed miss, filled red as they go
     const sx = mx + tw(ml, mf) + 9 * u, sw = lx + LW - 12 * u - sx, n = allowed, gap = n > 12 ? 1.5 * u : 2.5 * u, seg = (sw - gap * (n - 1)) / n, sy = T + 31.5 * u, sh = 6 * u;
     for (let i = 0; i < n; i++) {
       rr(sx + i * (seg + gap), sy, seg, sh, Math.min(sh / 2, seg / 2));
-      ctx.fillStyle = i < missed ? (crit ? `rgb(255,${70 + 50 * pulse},${60 + 40 * pulse})` : "#ff6257") : "rgba(255,255,255,0.16)"; ctx.fill();
+      if (sv > 0.02) { ctx.strokeStyle = `rgba(3,18,30,${0.6 * sv})`; ctx.lineWidth = 2 * u; ctx.stroke(); }
+      ctx.fillStyle = i < missed ? (crit ? `rgb(255,${70 + 50 * pulse},${60 + 40 * pulse})` : "#ff6257") : `rgba(255,255,255,${0.16 + 0.1 * sv})`; ctx.fill();
     }
+    HALO = 0;
 
     // centre: rescued / quota (the goal) with a progress bar
     const quota = Math.max(1, h.quota | 0), caught = Math.min(quota, h.caught | 0);
@@ -342,7 +405,9 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     anim.level = h.level;
     anim.caught += (caught - anim.caught) * Math.min(1, 0.18);
     const CWp = 280 * u, cx0 = CW / 2 - CWp / 2;
-    glass(cx0, T, CWp, PH, R);
+    sv = see("goal", { x: cx0, y: T, w: CWp, h: PH });
+    glass(cx0, T, CWp, PH, R, { see: sv });
+    HALO = sv;
     const fl = uiFont(500, 15 * u), fn = uiFont(700, 21 * u), fq = uiFont(600, 15 * u);
     let x = cx0 + 14 * u; const by = T + 21.5 * u;
     text("Räddade", x, by, fl, C.soft); x += tw("Räddade ", fl);
@@ -350,9 +415,9 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     text(` / ${quota}`, x, by, fq, C.muted);
     const pl = `${h.n} spelare`, pf = uiFont(500, 12.5 * u), pw = tw(pl, pf);
     text(pl, cx0 + CWp - 14 * u, by, pf, C.muted, "right");
-    icon.person(cx0 + CWp - 14 * u - pw - 9 * u, by - 4.5 * u, 12 * u, C.muted);
+    hs = haloOn(); icon.person(cx0 + CWp - 14 * u - pw - 9 * u, by - 4.5 * u, 12 * u, C.muted); if (hs) ctx.restore();
     const bx = cx0 + 14 * u, bw = CWp - 28 * u, bh = 9 * u, bY = T + 29 * u, fr = Math.max(0, Math.min(1, anim.caught / quota));
-    rr(bx, bY, bw, bh, bh / 2); ctx.fillStyle = "rgba(0,12,22,0.55)"; ctx.fill(); ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1; ctx.stroke();
+    rr(bx, bY, bw, bh, bh / 2); ctx.fillStyle = `rgba(0,12,22,${0.55 - 0.3 * sv})`; ctx.fill(); ctx.strokeStyle = `rgba(255,255,255,${0.10 + 0.25 * sv})`; ctx.lineWidth = 1; ctx.stroke();
     if (fr > 0.002) {
       const fw = Math.max(bh, bw * fr), g = ctx.createLinearGradient(bx, 0, bx + bw, 0);
       g.addColorStop(0, "#21b878"); g.addColorStop(1, "#5fe8a8");
@@ -368,26 +433,38 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     anim.score = sc;
     const sl = "Din poäng", slf = uiFont(500, 12.5 * u), snf = uiFont(700, 24 * u);
     const RW = Math.max(104 * u, tw(String(sc), snf) + 30 * u, tw(sl, slf) + 28 * u), rx = CW - T - RW;
-    glass(rx, T, RW, PH, R);
+    sv = see("score", { x: rx, y: T, w: RW, h: PH });
+    glass(rx, T, RW, PH, R, { see: sv });
+    HALO = sv;
     text(sl, rx + RW / 2, T + 16.5 * u, slf, C.muted, "center");
     const pop = 1 + 0.22 * anim.pop * anim.pop;
     ctx.save(); ctx.translate(rx + RW / 2, T + 40.5 * u); ctx.scale(pop, pop);
     text(String(sc), 0, 0, snf, anim.pop > 0.05 ? "#ffb184" : C.accentHi, "center"); ctx.restore();
+    HALO = 0;
   }
   function drawScoreboard(v) {
     if (v.hud.n < 2 || !v.players) return;
-    const board = [...v.players].map((p) => ({ name: p.id === L.selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, hue: p.hue, you: p.id === L.selfId })).sort((a, b) => b.score - a.score).slice(0, 8);
+    const all = [...v.players].map((p) => ({ name: p.id === L.selfId ? "Du" : (p.name || "Spelare"), score: p.score || 0, hue: p.hue, you: p.id === L.selfId })).sort((a, b) => b.score - a.score);
+    // a short list: the leaders, and you on the last row (with your place) when you are further down.
+    // Phones (u > 1.15) get four rows, larger canvases six: the full table is on the level board.
+    const max = u > 1.15 ? 4 : 6;
+    let board = all.slice(0, max);
+    if (all.length > max) { const yi = all.findIndex((b) => b.you); if (yi >= max) board = [...all.slice(0, max - 1), { ...all[yi], place: yi + 1 }]; }
     const T = 10 * u, x = T, y = T + 48 * u + 8 * u, rh = 18 * u, w = 164 * u, hgt = board.length * rh + 10 * u;
-    glass(x, y, w, hgt, 12 * u, { alpha: 0.55 });
+    const sv = see("board", { x, y, w, h: hgt });
+    glass(x, y, w, hgt, 12 * u, { alpha: 0.55, see: sv });
+    HALO = sv;
     const nf = uiFont(600, 13 * u), sf = uiFont(700, 13 * u);
     board.forEach((b, i) => {
       const ry = y + 5 * u + i * rh, mid = ry + rh / 2;
-      if (b.you) { rr(x + 4 * u, ry + 1 * u, w - 8 * u, rh - 2 * u, 7 * u); ctx.fillStyle = "rgba(244,87,29,0.22)"; ctx.fill(); }
+      if (b.you) { rr(x + 4 * u, ry + 1 * u, w - 8 * u, rh - 2 * u, 7 * u); ctx.fillStyle = `rgba(244,87,29,${0.22 * (1 - 0.5 * sv)})`; ctx.fill(); }
       ctx.fillStyle = `hsl(${b.hue},85%,60%)`; ctx.beginPath(); ctx.arc(x + 14 * u, mid, 4.5 * u, 0, Math.PI * 2); ctx.fill();
-      const st = `${b.score} p`, sw = tw(st, sf);
-      text(fitText(b.name, nf, w - 40 * u - sw), x + 24 * u, mid + 0.5 * u, nf, b.you ? "#ffd7c7" : C.ink, "left", "middle");
+      if (sv > 0.02) { ctx.strokeStyle = `rgba(3,18,30,${0.6 * sv})`; ctx.lineWidth = 1.5 * u; ctx.stroke(); }
+      const st = `${b.score} p`, sw = tw(st, sf), nm = b.place ? `${b.place}. ${b.name}` : b.name;
+      text(fitText(nm, nf, w - 40 * u - sw), x + 24 * u, mid + 0.5 * u, nf, b.you ? "#ffd7c7" : C.ink, "left", "middle");
       text(st, x + w - 10 * u, mid + 0.5 * u, sf, b.you ? "#ffd7c7" : C.soft, "right", "middle");
     });
+    HALO = 0;
   }
 
   // ---- screens ---------------------------------------------------------------
@@ -402,6 +479,11 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
       if (blurB.width !== bw || blurB.height !== bh) { blurB.width = bw; blurB.height = bh; }
       const a = blurA.getContext("2d"), b = blurB.getContext("2d");
       a.imageSmoothingQuality = b.imageSmoothingQuality = "high";
+      // with the GPU water the game canvas is transparent over the water: blur the water layer
+      // (read back in the same frame it was drawn) together with what is drawn on top of it
+      const layer = underlay && underlay();
+      a.clearRect(0, 0, aw, ah);
+      if (layer) a.drawImage(layer, 0, 0, layer.width, layer.height, 0, 0, aw, ah);
       a.drawImage(canvas, 0, 0, W, H, 0, 0, aw, ah);
       if ("filter" in b) b.filter = "blur(1.2px)"; // (tiny canvas: cheap) rounds off the bilinear blocks
       b.clearRect(0, 0, bw, bh); b.drawImage(blurA, 0, 0, aw, ah, 0, 0, bw, bh);
@@ -644,10 +726,12 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     const want = hoverAny ? "pointer" : "";
     if (want !== cursor) { cursor = want; canvas.style.cursor = want; }
   }
-  function game(v) {
+  /** occList: what is in the water, as boxes in canvas coords: { x, y, w, h, kind: "swimmer" | "monster" | "ring", gauge? } */
+  function game(v, occList) {
     begin();
     if (v.phase !== anim.phase) { anim.phase = v.phase; anim.phaseT = 0; }
     const screen = v.phase === Phase.CLEARED || v.phase === Phase.OVER || v.phase === Phase.WIN;
+    occ = screen ? [] : occList || []; under.clear(); for (const k in seeRects) delete seeRects[k];
     ctx.save();
     if (!screen) {
       if (v.phase === Phase.INTRO) { ctx.save(); ctx.globalAlpha = Math.min(1, anim.phaseT * 4); ctx.fillStyle = "rgba(3,16,26,0.34)"; ctx.fillRect(0, 0, CW, CH); ctx.restore(); } // dim the water, not the HUD
@@ -655,7 +739,11 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     }
     else if (v.phase === Phase.CLEARED) drawLevelBoard(v);
     else drawEndScreen(v, v.phase === Phase.WIN);
-    drawQuit(v); drawMute();
+    drawQuit(v); drawMute(!screen); seeFs();
+    // a swimmer under any HUD piece: its sink gauge again, above the HUD
+    let gauges = 0;
+    if (!screen && drawGauge) for (const o of under) if (o.gauge) { drawGauge(o.gauge); gauges++; }
+    seeRects._gauges = gauges;
     ctx.restore();
     end();
   }
@@ -665,11 +753,13 @@ export function createHud(canvas, ctx, { CW, CH, mode, myName, netSummary, selfP
     actionBtn: () => ACTION_BTN, leaveBtn: () => LEAVE_BTN,
     /** Start of a frame: animation clock, nothing clickable until drawn, the layout for this canvas size. */
     beginFrame(dt) {
-      t += dt; ACTION_BTN = null; LEAVE_BTN = null; layout();
+      t += dt; frameDt = Math.min(0.1, Math.max(0, dt)); ACTION_BTN = null; LEAVE_BTN = null; layout();
       anim.pop = Math.max(0, anim.pop - dt * 3); anim.flash = Math.max(0, anim.flash - dt * 1.4); anim.ping = Math.max(0, anim.ping - dt * 3); anim.phaseT += dt;
     },
     game,
-    lobby(v) { begin(); ctx.save(); drawLobby(v); ctx.restore(); end(); },
-    wait(msg) { begin(); ctx.save(); drawWait(msg); ctx.restore(); end(); },
+    lobby(v) { begin(); occ = []; ctx.save(); drawLobby(v); ctx.restore(); seeFs(); end(); },
+    wait(msg) { begin(); occ = []; ctx.save(); drawWait(msg); ctx.restore(); seeFs(); end(); },
+    /** tests / debug(): each HUD piece's rect this frame and how see-through it is (+ _gauges: sink gauges redrawn above the HUD) */
+    see: () => JSON.parse(JSON.stringify(seeRects)),
   };
 }
